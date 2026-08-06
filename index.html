@@ -415,7 +415,7 @@ class En{constructor(e,t,r,n,o,i,a,s){this.canonicalAuthority=e,this._canonicalA
   var panel, statusEl;
   function ui(){
     panel=document.createElement("div");
-    panel.style.cssText="position:fixed;top:10px;right:14px;z-index:99999;background:#fff;border:1px solid #E2E7EF;border-radius:10px;box-shadow:0 6px 18px rgba(0,0,0,.10);padding:8px 12px;font:600 12.5px 'Segoe UI',sans-serif;color:#1F2A44;display:flex;align-items:center;gap:10px";
+    panel.style.cssText="position:fixed;bottom:14px;right:14px;z-index:99999;background:#fff;border:1px solid #E2E7EF;border-radius:10px;box-shadow:0 6px 18px rgba(0,0,0,.10);padding:8px 12px;font:600 12.5px 'Segoe UI',sans-serif;color:#1F2A44;display:flex;align-items:center;gap:10px";
     statusEl=document.createElement("span");
     panel.appendChild(statusEl);
     document.body.appendChild(panel);
@@ -433,7 +433,7 @@ class En{constructor(e,t,r,n,o,i,a,s){this.canonicalAuthority=e,this._canonicalA
     panel.replaceChildren(wrap, btn("Load latest",loadLatest));
   }
   function say(m){ render(m); }
-  function err(m){ if(statusEl){ statusEl.parentNode.replaceChildren(function(){var s=document.createElement("span");s.innerHTML=dot("#E7442B")+"Sync issue: "+m;return s;}()); if(TP.configured) statusEl.parentNode.appendChild(btn("Retry",connect)); } console.error("TP sync:",m); }
+  function err(m){ console.error("TP sync:",m); if(!panel) return; var s=document.createElement("span"); s.innerHTML=dot("#E7442B")+String(m).slice(0,200); panel.replaceChildren(s, btn("Retry",connect)); }
 
   /* ---- MSAL ---- */
   var msalApp;
@@ -456,7 +456,7 @@ class En{constructor(e,t,r,n,o,i,a,s){this.canonicalAuthority=e,this._canonicalA
   async function g(path,method,body){
     var t=await token();
     var res=await fetch(path.indexOf("http")===0?path:GRAPH+path,{ method:method||"GET", headers:{ Authorization:"Bearer "+t, "Content-Type":"application/json" }, body:body?JSON.stringify(body):undefined });
-    if(!res.ok) throw new Error(method+" "+path+" -> "+res.status+" "+(await res.text()).slice(0,200));
+    if(!res.ok){ var st=res.status; var hint = st===403?"No write access to the site yet \u2014 ask Alan to grant the app Write on PartnershipContent (Sites.Selected)." : st===404?"Couldn\u2019t find TeamPulse-Data.xlsx in the Documents library \u2014 check it\u2019s uploaded to the top level." : st===401?"Sign-in expired \u2014 click Connect again." : ("Error "+st); throw new Error(hint+" ["+st+"]"); }
     return res.status===204?null:res.json();
   }
   async function resolveFile(){
@@ -505,16 +505,6 @@ class En{constructor(e,t,r,n,o,i,a,s){this.canonicalAuthority=e,this._canonicalA
   if(document.readyState==="loading") document.addEventListener("DOMContentLoaded",boot); else boot();
 })();
 </script>
-<script>function _jsxDEV(type, props, key){
-  props = props || {};
-  var children = props.children, rest = {};
-  for (var k in props){ if (k !== "children") rest[k] = props[k]; }
-  if (key !== undefined && key !== null) rest.key = key;
-  if (children === undefined) return React.createElement(type, rest);
-  if (Array.isArray(children)) return React.createElement.apply(null, [type, rest].concat(children));
-  return React.createElement(type, rest, children);
-}
-</script>
 <script>const {
   useState,
   useEffect,
@@ -522,11 +512,11 @@ class En{constructor(e,t,r,n,o,i,a,s){this.canonicalAuthority=e,this._canonicalA
   useRef
 } = React;
 
-/* ------------------------------------------------------------------ */
-/*  Boostworks — Team Pulse (standalone HTML)                          */
-/* ------------------------------------------------------------------ */
+/* Boostworks — Team Pulse (app UI). Stored in localStorage; the sync layer bridges to Excel. */
 const STORAGE_KEY = "teampulse:board:v4";
-const APP_VERSION = "2.0";
+const APP_VERSION = "2.1";
+const OWNERS = ["", "Enzo", "ES", "Phil", "Kim", "Stuart", "Sofia", "All"];
+const HL_STATUS = ["", "Open", "In progress", "Complete"];
 const t = {
   navy: "#1F2A44",
   navyDeep: "#161F33",
@@ -562,6 +552,7 @@ const RAG = {
 const nextRag = v => v === "G" ? "A" : v === "A" ? "R" : "G";
 const uid = () => Math.random().toString(36).slice(2, 9);
 const today = () => new Date().toISOString().slice(0, 10);
+const nowISO = () => new Date().toISOString();
 const isOverdue = d => d && d < today();
 const fmtWhen = iso => {
   if (!iso) return "—";
@@ -604,8 +595,21 @@ const fmtVal = v => {
   return String(v);
 };
 const confirmDel = msg => window.confirm(msg || "Delete this? This can't be undone.");
+function cumulativeOf(m) {
+  const tg = parseTarget(m.goal);
+  const pctTarget = !isNaN(tg) && Math.abs(tg) < 1;
+  const allFrac = m.history.length > 0 && m.history.every(h => {
+    const n = num(h.value);
+    return !isNaN(n) && Math.abs(n) <= 1;
+  });
+  if (pctTarget || allFrac) return null;
+  return m.history.reduce((a, h) => {
+    const n = num(h.value);
+    return a + (isNaN(n) ? 0 : n);
+  }, 0);
+}
 
-/* ------------------------------- toast ----------------------------- */
+/* toast */
 let _toast = null;
 const toast = m => {
   if (_toast) _toast(m);
@@ -615,15 +619,15 @@ function ToastHost() {
   useEffect(() => {
     _toast = m => {
       setMsg(m);
-      window.clearTimeout(ToastHost._t);
-      ToastHost._t = window.setTimeout(() => setMsg(null), 1800);
+      clearTimeout(ToastHost._t);
+      ToastHost._t = setTimeout(() => setMsg(null), 1800);
     };
     return () => {
       _toast = null;
     };
   }, []);
   if (!msg) return null;
-  return /*#__PURE__*/_jsxDEV("div", {
+  return /*#__PURE__*/React.createElement("div", {
     style: {
       position: "fixed",
       bottom: 22,
@@ -636,14 +640,12 @@ function ToastHost() {
       fontSize: 14,
       fontWeight: 600,
       boxShadow: "0 8px 24px rgba(0,0,0,.20)",
-      zIndex: 9999,
-      animation: "tp-rise .15s ease"
-    },
-    children: msg
-  }, void 0, false);
+      zIndex: 9999
+    }
+  }, msg);
 }
 
-/* ------------------------------- icons ----------------------------- */
+/* icons */
 const ICONS = {
   dashboard: "M4 4h7v7H4zM13 4h7v4h-7zM13 12h7v8h-7zM4 15h7v6H4z",
   gauge: "M4 19a8 8 0 1 1 16 0M12 14l4-4",
@@ -665,7 +667,7 @@ const ICONS = {
   archive: "M3 4h18v4H3zM5 8v12h14V8M9 12h6",
   restore: "M3 4h18v4H3zM5 8v12h14V8M12 18v-6M9 15l3-3 3 3",
   pencil: "M4 20h4L20 8l-4-4L4 16z",
-  x: "M6 6l12 12M18 6L6 18"
+  done: "M5 12l4 4L19 6"
 };
 function Icon({
   name,
@@ -674,7 +676,7 @@ function Icon({
   fill
 }) {
   const filled = name === "sparkles";
-  return /*#__PURE__*/_jsxDEV("svg", {
+  return /*#__PURE__*/React.createElement("svg", {
     width: size,
     height: size,
     viewBox: "0 0 24 24",
@@ -686,14 +688,13 @@ function Icon({
     style: {
       flexShrink: 0,
       display: "block"
-    },
-    children: /*#__PURE__*/_jsxDEV("path", {
-      d: ICONS[name] || ""
-    }, void 0, false)
-  }, void 0, false);
+    }
+  }, /*#__PURE__*/React.createElement("path", {
+    d: ICONS[name] || ""
+  }));
 }
 
-/* ------------------------------- seed ------------------------------ */
+/* seed (used only if there's no data at all) */
 const seed = () => ({
   meta: {
     team: "Partner & Content — L10",
@@ -736,36 +737,6 @@ const seed = () => ({
     unit: "",
     rag: "R",
     history: [{
-      week: "2026-04-07",
-      value: 8350
-    }, {
-      week: "2026-04-28",
-      value: 20299
-    }, {
-      week: "2026-05-05",
-      value: 3000
-    }, {
-      week: "2026-05-26",
-      value: 11674
-    }, {
-      week: "2026-06-02",
-      value: 11786
-    }, {
-      week: "2026-06-09",
-      value: 8370
-    }, {
-      week: "2026-06-16",
-      value: 7953
-    }, {
-      week: "2026-06-23",
-      value: 7536
-    }, {
-      week: "2026-06-30",
-      value: 7307
-    }, {
-      week: "2026-07-07",
-      value: 5008
-    }, {
       week: "2026-07-14",
       value: 2658
     }, {
@@ -780,21 +751,6 @@ const seed = () => ({
     unit: "",
     rag: "R",
     history: [{
-      week: "2026-04-07",
-      value: 525944
-    }, {
-      week: "2026-04-14",
-      value: 668791
-    }, {
-      week: "2026-04-21",
-      value: 650841
-    }, {
-      week: "2026-04-28",
-      value: 684001
-    }, {
-      week: "2026-05-05",
-      value: 760217
-    }, {
       week: "2026-05-12",
       value: 704080
     }, {
@@ -809,36 +765,6 @@ const seed = () => ({
     unit: "",
     rag: "R",
     history: [{
-      week: "2026-04-07",
-      value: -0.0295
-    }, {
-      week: "2026-04-14",
-      value: 0.0143
-    }, {
-      week: "2026-04-21",
-      value: -0.0029
-    }, {
-      week: "2026-04-28",
-      value: -0.0007
-    }, {
-      week: "2026-05-05",
-      value: -0.0077
-    }, {
-      week: "2026-05-12",
-      value: -0.0157
-    }, {
-      week: "2026-05-19",
-      value: -0.0045
-    }, {
-      week: "2026-05-26",
-      value: 0.0033
-    }, {
-      week: "2026-06-02",
-      value: 0.0034
-    }, {
-      week: "2026-06-09",
-      value: 0.0122
-    }, {
       week: "2026-06-16",
       value: -0.018
     }, {
@@ -853,42 +779,6 @@ const seed = () => ({
     unit: "",
     rag: "G",
     history: [{
-      week: "2026-04-14",
-      value: 0
-    }, {
-      week: "2026-04-21",
-      value: 1
-    }, {
-      week: "2026-04-28",
-      value: 2
-    }, {
-      week: "2026-05-05",
-      value: 5
-    }, {
-      week: "2026-05-12",
-      value: 2
-    }, {
-      week: "2026-05-19",
-      value: 7
-    }, {
-      week: "2026-05-26",
-      value: 1
-    }, {
-      week: "2026-06-02",
-      value: 4
-    }, {
-      week: "2026-06-09",
-      value: 8
-    }, {
-      week: "2026-06-16",
-      value: 4
-    }, {
-      week: "2026-06-23",
-      value: 4
-    }, {
-      week: "2026-06-30",
-      value: 6
-    }, {
       week: "2026-07-07",
       value: 5
     }, {
@@ -898,101 +788,19 @@ const seed = () => ({
   }],
   rocks: [{
     id: uid(),
-    title: "Build a high-performing Commercial function by combining Affiliate and Direct models into the B2B Partnerships & Content Team — delivering revenue target, a qualified pipeline, and a clear team structure, process and ownership model.",
+    title: "Build a high-performing Commercial function by combining Affiliate and Direct models into the B2B Partnerships & Content Team.",
     owner: "ES",
     due: "2026-06-30",
     pct: "0",
     rag: "R",
-    note: ""
+    note: "",
+    noteAt: null
   }],
   headlines: [{
     id: uid(),
     title: "Wellbeing and Benefits Portal review",
-    commentary: "Future opp and explore list with SD when ready",
-    owner: "",
-    status: "",
-    date: ""
-  }, {
-    id: uid(),
-    title: "Commercial to Content process",
-    commentary: "",
-    owner: "",
-    status: "",
-    date: ""
-  }, {
-    id: uid(),
-    title: "Beyond Retail — Drench & Tap Warehouse",
-    commentary: "2x brands tenancy opp",
-    owner: "Kim",
-    status: "Complete",
-    date: "2026-05-12"
-  }, {
-    id: uid(),
-    title: "P2 vs P1 update",
-    commentary: "",
-    owner: "",
-    status: "",
-    date: ""
-  }, {
-    id: uid(),
-    title: "Wellbeing partners",
-    commentary: "When onboarding, inform Sales, Marketing (Mel) and Ops to help with exposure. Review TaxRefund and Elderly Care Helpline (Time for Care).",
-    owner: "",
-    status: "",
-    date: ""
-  }, {
-    id: uid(),
-    title: "SharePoint — M&J",
-    commentary: "",
-    owner: "",
-    status: "",
-    date: ""
-  }, {
-    id: uid(),
-    title: "Processes",
-    commentary: "",
-    owner: "",
-    status: "",
-    date: ""
-  }, {
-    id: uid(),
-    title: "Phil onboarding",
-    commentary: "",
-    owner: "",
-    status: "",
-    date: ""
-  }, {
-    id: uid(),
-    title: "Phil pre-onboarding",
-    commentary: "Documents / information / data",
-    owner: "",
-    status: "",
-    date: ""
-  }, {
-    id: uid(),
-    title: "Sofia — extra values",
-    commentary: "",
-    owner: "",
-    status: "",
-    date: ""
-  }, {
-    id: uid(),
-    title: "Adam offers file",
-    commentary: "",
-    owner: "",
-    status: "",
-    date: "2026-06-02"
-  }, {
-    id: uid(),
-    title: "HotelPlanner CPA portal",
-    commentary: "",
-    owner: "",
-    status: "",
-    date: ""
-  }, {
-    id: uid(),
-    title: "Anker Solix terminated",
-    commentary: "Notice served",
+    commentary: "Future opp — explore with SD when ready",
+    commentaryAt: null,
     owner: "",
     status: "",
     date: ""
@@ -1004,15 +812,8 @@ const seed = () => ({
     date: "2026-05-02",
     priority: "1",
     rag: "A",
-    note: ""
-  }, {
-    id: uid(),
-    title: "Cashback integration error",
-    owner: "Sofia",
-    date: "",
-    priority: "2",
-    rag: "A",
-    note: ""
+    note: "",
+    noteAt: null
   }],
   todos: [{
     id: uid(),
@@ -1021,86 +822,7 @@ const seed = () => ({
     raised: "2026-05-12",
     due: "2026-05-19",
     note: "Review on 19th May",
-    done: false
-  }, {
-    id: uid(),
-    task: "Beyond Retail — 2x brands tenancy opp: Drench and Tap Warehouse",
-    owner: "Sofia",
-    raised: "2026-05-12",
-    due: "2026-05-19",
-    note: "",
-    done: false
-  }, {
-    id: uid(),
-    task: "Affiliate onboarding",
-    owner: "Enzo",
-    raised: "2026-05-12",
-    due: "2026-05-19",
-    note: "Eva to share onboarding form to brands before launching",
-    done: false
-  }, {
-    id: uid(),
-    task: "AOD Marketing",
-    owner: "Sofia",
-    raised: "2026-05-12",
-    due: "2026-05-19",
-    note: "3-month period",
-    done: false
-  }, {
-    id: uid(),
-    task: "Dyson — Impact CPA",
-    owner: "Enzo",
-    raised: "2026-05-12",
-    due: "2026-05-19",
-    note: "",
-    done: false
-  }, {
-    id: uid(),
-    task: "Partner relationships (AM) — updated list",
-    owner: "Sofia",
-    raised: "2026-05-12",
-    due: "2026-05-19",
-    note: "",
-    done: false
-  }, {
-    id: uid(),
-    task: "Move folders to new Content & Partnerships SharePoint",
-    owner: "Sofia",
-    raised: "",
-    due: "",
-    note: "",
-    done: false
-  }, {
-    id: uid(),
-    task: "Tidy up L10 sheet",
-    owner: "Enzo",
-    raised: "",
-    due: "",
-    note: "",
-    done: false
-  }, {
-    id: uid(),
-    task: "Add in risks and opportunities",
-    owner: "Enzo",
-    raised: "",
-    due: "",
-    note: "",
-    done: false
-  }, {
-    id: uid(),
-    task: "Create Asana task for affiliate/B2B form",
-    owner: "Enzo",
-    raised: "",
-    due: "",
-    note: "",
-    done: false
-  }, {
-    id: uid(),
-    task: "Review all B2B partners",
-    owner: "Stuart",
-    raised: "",
-    due: "",
-    note: "",
+    noteAt: null,
     done: false
   }],
   archive: {
@@ -1114,9 +836,9 @@ function normalize(b) {
   if (!b.meta) b.meta = {};
   if (b.meta.build !== APP_VERSION) {
     b.meta.build = APP_VERSION;
-    b.meta.lastUpdated = new Date().toISOString();
+    b.meta.lastUpdated = nowISO();
   }
-  if (!b.meta.lastUpdated) b.meta.lastUpdated = new Date().toISOString();
+  if (!b.meta.lastUpdated) b.meta.lastUpdated = nowISO();
   if (b.meta.commentaryText == null) b.meta.commentaryText = "";
   if (!b.archive) b.archive = {
     headlines: [],
@@ -1141,8 +863,6 @@ function normalize(b) {
   });
   return b;
 }
-
-/* ----------------------------- storage ----------------------------- */
 function loadBoard() {
   try {
     const r = localStorage.getItem(STORAGE_KEY);
@@ -1155,9 +875,7 @@ function saveBoard(b) {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(b));
   } catch (_) {}
 }
-
-/* ----------------------------- AI (optional) ----------------------- */
-const AI_MODEL = "claude-sonnet-4-6"; // change to a model your API key supports
+const AI_MODEL = "claude-sonnet-4-6";
 async function callClaude(userText, systemHint) {
   const key = localStorage.getItem("teampulse:aikey") || "";
   const headers = {
@@ -1186,7 +904,7 @@ async function callClaude(userText, systemHint) {
   return (data.content || []).filter(b => b.type === "text").map(b => b.text).join("\n").trim();
 }
 
-/* ============================== App =============================== */
+/* ============================ App ============================ */
 function App() {
   const [board, setBoard] = useState(null);
   const [view, setView] = useState("overview");
@@ -1196,7 +914,7 @@ function App() {
   useEffect(() => {
     if (board) saveBoard(board);
   }, [board]);
-  if (!board) return /*#__PURE__*/_jsxDEV("div", {
+  if (!board) return /*#__PURE__*/React.createElement("div", {
     style: {
       fontFamily: t.font,
       background: t.bg,
@@ -1205,25 +923,23 @@ function App() {
       alignItems: "center",
       justifyContent: "center",
       color: t.muted
-    },
-    children: [/*#__PURE__*/_jsxDEV(Icon, {
-      name: "loader",
-      size: 18
-    }, void 0, false), " ", /*#__PURE__*/_jsxDEV("span", {
-      style: {
-        marginLeft: 8
-      },
-      children: "Loading…"
-    }, void 0, false)]
-  }, void 0, true);
+    }
+  }, /*#__PURE__*/React.createElement(Icon, {
+    name: "loader",
+    size: 18
+  }), " ", /*#__PURE__*/React.createElement("span", {
+    style: {
+      marginLeft: 8
+    }
+  }, "Loading…"));
   const stampNow = next => ({
     ...next,
     meta: {
       ...next.meta,
-      lastUpdated: new Date().toISOString()
+      lastUpdated: nowISO()
     }
   });
-  const updateBoard = updater => setBoard(prev => stampNow(typeof updater === "function" ? updater(prev) : updater));
+  const updateBoard = u => setBoard(prev => stampNow(typeof u === "function" ? u(prev) : u));
   const set = patch => updateBoard(b => ({
     ...b,
     ...patch
@@ -1263,158 +979,147 @@ function App() {
     label: "Transcript intake",
     icon: "file"
   }];
-  return /*#__PURE__*/_jsxDEV("div", {
+  return /*#__PURE__*/React.createElement("div", {
     style: {
       fontFamily: t.font,
       background: t.bg,
       minHeight: "100vh",
       color: t.body,
       display: "flex"
-    },
-    children: [/*#__PURE__*/_jsxDEV(ToastHost, {}, void 0, false), /*#__PURE__*/_jsxDEV("aside", {
-      className: "tp-side",
+    }
+  }, /*#__PURE__*/React.createElement(ToastHost, null), /*#__PURE__*/React.createElement("aside", {
+    className: "tp-side",
+    style: {
+      width: 216,
+      background: t.navy,
+      color: "#fff",
+      display: "flex",
+      flexDirection: "column",
+      position: "sticky",
+      top: 0,
+      height: "100vh"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: "22px 20px 16px"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      letterSpacing: 2,
+      color: "#9BA6BD",
+      fontWeight: 600
+    }
+  }, "BOOSTWORKS"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 22,
+      fontWeight: 700,
+      marginTop: 2,
+      lineHeight: 1.1
+    }
+  }, "Team Pulse"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      height: 3,
+      width: 34,
+      background: t.red,
+      borderRadius: 2,
+      marginTop: 10
+    }
+  })), /*#__PURE__*/React.createElement("nav", {
+    style: {
+      padding: "6px 12px",
+      flex: 1
+    }
+  }, nav.map(n => {
+    const active = view === n.k;
+    return /*#__PURE__*/React.createElement("button", {
+      key: n.k,
+      onClick: () => setView(n.k),
+      className: "tp-navbtn",
       style: {
-        width: 216,
-        background: t.navy,
-        color: "#fff",
         display: "flex",
-        flexDirection: "column",
-        position: "sticky",
-        top: 0,
-        height: "100vh"
-      },
-      children: [/*#__PURE__*/_jsxDEV("div", {
-        style: {
-          padding: "22px 20px 16px"
-        },
-        children: [/*#__PURE__*/_jsxDEV("div", {
-          style: {
-            fontSize: 11,
-            letterSpacing: 2,
-            color: "#9BA6BD",
-            fontWeight: 600
-          },
-          children: "BOOSTWORKS"
-        }, void 0, false), /*#__PURE__*/_jsxDEV("div", {
-          style: {
-            fontSize: 22,
-            fontWeight: 700,
-            marginTop: 2,
-            lineHeight: 1.1
-          },
-          children: "Team Pulse"
-        }, void 0, false), /*#__PURE__*/_jsxDEV("div", {
-          style: {
-            height: 3,
-            width: 34,
-            background: t.red,
-            borderRadius: 2,
-            marginTop: 10
-          }
-        }, void 0, false)]
-      }, void 0, true), /*#__PURE__*/_jsxDEV("nav", {
-        style: {
-          padding: "6px 12px",
-          flex: 1
-        },
-        children: nav.map(n => {
-          const active = view === n.k;
-          return /*#__PURE__*/_jsxDEV("button", {
-            onClick: () => setView(n.k),
-            className: "tp-navbtn",
-            style: {
-              display: "flex",
-              alignItems: "center",
-              gap: 11,
-              width: "100%",
-              textAlign: "left",
-              background: active ? "rgba(231,68,43,.16)" : "transparent",
-              color: active ? "#fff" : "#C3CBDC",
-              border: "none",
-              borderLeft: active ? `3px solid ${t.red}` : "3px solid transparent",
-              padding: "10px 12px",
-              borderRadius: 7,
-              cursor: "pointer",
-              font: "inherit",
-              fontSize: 14,
-              fontWeight: active ? 600 : 500,
-              marginBottom: 2
-            },
-            children: [/*#__PURE__*/_jsxDEV(Icon, {
-              name: n.icon,
-              size: 17
-            }, void 0, false), " ", /*#__PURE__*/_jsxDEV("span", {
-              style: {
-                flex: 1
-              },
-              children: n.label
-            }, void 0, false), n.badge ? /*#__PURE__*/_jsxDEV("span", {
-              style: {
-                background: "rgba(255,255,255,.15)",
-                borderRadius: 10,
-                fontSize: 11,
-                padding: "1px 7px"
-              },
-              children: n.badge
-            }, void 0, false) : null]
-          }, n.k, true);
-        })
-      }, void 0, false), /*#__PURE__*/_jsxDEV("div", {
-        style: {
-          padding: 14,
-          fontSize: 11,
-          color: "#7C879E"
-        },
-        children: "Saved to this browser · edits persist"
-      }, void 0, false)]
-    }, void 0, true), /*#__PURE__*/_jsxDEV("main", {
+        alignItems: "center",
+        gap: 11,
+        width: "100%",
+        textAlign: "left",
+        background: active ? "rgba(231,68,43,.16)" : "transparent",
+        color: active ? "#fff" : "#C3CBDC",
+        border: "none",
+        borderLeft: active ? `3px solid ${t.red}` : "3px solid transparent",
+        padding: "10px 12px",
+        borderRadius: 7,
+        cursor: "pointer",
+        font: "inherit",
+        fontSize: 14,
+        fontWeight: active ? 600 : 500,
+        marginBottom: 2
+      }
+    }, /*#__PURE__*/React.createElement(Icon, {
+      name: n.icon,
+      size: 17
+    }), " ", /*#__PURE__*/React.createElement("span", {
       style: {
-        flex: 1,
-        minWidth: 0
-      },
-      children: [/*#__PURE__*/_jsxDEV(TopBar, {
-        board: board,
-        set: set,
-        setView: setView
-      }, void 0, false), /*#__PURE__*/_jsxDEV("div", {
-        style: {
-          padding: "22px 26px 60px",
-          maxWidth: 1100,
-          margin: "0 auto"
-        },
-        children: [view === "overview" && /*#__PURE__*/_jsxDEV(Overview, {
-          board: board,
-          set: set,
-          setView: setView
-        }, void 0, false), view === "metrics" && /*#__PURE__*/_jsxDEV(Metrics, {
-          board: board,
-          setBoard: updateBoard
-        }, void 0, false), view === "rocks" && /*#__PURE__*/_jsxDEV(Rocks, {
-          board: board,
-          setBoard: updateBoard
-        }, void 0, false), view === "headlines" && /*#__PURE__*/_jsxDEV(Headlines, {
-          board: board,
-          setBoard: updateBoard
-        }, void 0, false), view === "issues" && /*#__PURE__*/_jsxDEV(Issues, {
-          board: board,
-          setBoard: updateBoard
-        }, void 0, false), view === "todos" && /*#__PURE__*/_jsxDEV(Todos, {
-          board: board,
-          setBoard: updateBoard
-        }, void 0, false), view === "archive" && /*#__PURE__*/_jsxDEV(ArchiveView, {
-          board: board,
-          setBoard: updateBoard
-        }, void 0, false), view === "intake" && /*#__PURE__*/_jsxDEV(Intake, {
-          board: board,
-          setBoard: updateBoard,
-          setView: setView
-        }, void 0, false)]
-      }, void 0, true)]
-    }, void 0, true)]
-  }, void 0, true);
+        flex: 1
+      }
+    }, n.label), n.badge ? /*#__PURE__*/React.createElement("span", {
+      style: {
+        background: "rgba(255,255,255,.15)",
+        borderRadius: 10,
+        fontSize: 11,
+        padding: "1px 7px"
+      }
+    }, n.badge) : null);
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: 14,
+      fontSize: 11,
+      color: "#7C879E"
+    }
+  }, "Saved to the shared file")), /*#__PURE__*/React.createElement("main", {
+    style: {
+      flex: 1,
+      minWidth: 0
+    }
+  }, /*#__PURE__*/React.createElement(TopBar, {
+    board: board,
+    set: set,
+    setView: setView
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: "22px 26px 80px",
+      maxWidth: 1100,
+      margin: "0 auto"
+    }
+  }, view === "overview" && /*#__PURE__*/React.createElement(Overview, {
+    board: board,
+    set: set,
+    setView: setView
+  }), view === "metrics" && /*#__PURE__*/React.createElement(Metrics, {
+    board: board,
+    setBoard: updateBoard
+  }), view === "rocks" && /*#__PURE__*/React.createElement(Rocks, {
+    board: board,
+    setBoard: updateBoard
+  }), view === "headlines" && /*#__PURE__*/React.createElement(Headlines, {
+    board: board,
+    setBoard: updateBoard
+  }), view === "issues" && /*#__PURE__*/React.createElement(Issues, {
+    board: board,
+    setBoard: updateBoard
+  }), view === "todos" && /*#__PURE__*/React.createElement(Todos, {
+    board: board,
+    setBoard: updateBoard
+  }), view === "archive" && /*#__PURE__*/React.createElement(ArchiveView, {
+    board: board,
+    setBoard: updateBoard
+  }), view === "intake" && /*#__PURE__*/React.createElement(Intake, {
+    board: board,
+    setBoard: updateBoard,
+    setView: setView
+  }))));
 }
 
-/* ----------------------------- Top bar ----------------------------- */
+/* Top bar */
 function TopBar({
   board,
   set,
@@ -1423,17 +1128,19 @@ function TopBar({
   const fileRef = useRef(null);
   const exportXlsx = () => {
     if (typeof XLSX === "undefined") {
-      toast("Excel export needs an internet connection");
+      toast("Excel export needs internet");
       return;
     }
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(board.metrics.map(m => {
       const last = m.history[m.history.length - 1];
+      const c = cumulativeOf(m);
       return {
         Metric: m.name,
         Owner: m.owner,
         Target: m.goal,
         Latest: last ? last.value : "",
+        Cumulative: c == null ? "" : c,
         Status: RAG[m.rag].label
       };
     })), "Scorecard");
@@ -1444,9 +1151,7 @@ function TopBar({
       Value: h.value
     })));
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(hist.length ? hist : [{
-      Metric: "",
-      Week: "",
-      Value: ""
+      Metric: ""
     }]), "Scorecard history");
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(board.rocks.map(r => ({
       Rock: r.title,
@@ -1491,10 +1196,10 @@ function TopBar({
     }));
     a.download = `TeamPulse_${board.meta.weekOf}.xlsx`;
     a.click();
-    toast("Exported to Excel");
+    toast("Exported");
   };
   const reset = () => {
-    if (confirm("Reload the board from the sample L10 data? Your current entries will be cleared.")) {
+    if (confirm("Reload from sample data? Current entries clear.")) {
       set(seed());
       setView("overview");
       toast("Reset");
@@ -1510,15 +1215,15 @@ function TopBar({
     toast("Backup saved");
   };
   const restore = e => {
-    const file = e.target.files && e.target.files[0];
-    if (!file) return;
+    const f = e.target.files && e.target.files[0];
+    if (!f) return;
     const rd = new FileReader();
     rd.onload = () => {
       try {
-        const data = JSON.parse(String(rd.result));
-        if (!data.metrics || !data.rocks || !data.todos) throw new Error("Not a Team Pulse backup.");
+        const d = JSON.parse(String(rd.result));
+        if (!d.metrics || !d.rocks || !d.todos) throw new Error("Not a Team Pulse backup.");
         if (confirm("Replace the current board with this backup?")) {
-          set(normalize(data));
+          set(normalize(d));
           setView("overview");
           toast("Restored");
         }
@@ -1528,9 +1233,9 @@ function TopBar({
         e.target.value = "";
       }
     };
-    rd.readAsText(file);
+    rd.readAsText(f);
   };
-  return /*#__PURE__*/_jsxDEV("div", {
+  return /*#__PURE__*/React.createElement("div", {
     style: {
       background: "#fff",
       borderBottom: `1px solid ${t.border}`,
@@ -1539,149 +1244,132 @@ function TopBar({
       alignItems: "center",
       gap: 14,
       flexWrap: "wrap"
-    },
-    children: [/*#__PURE__*/_jsxDEV("div", {
-      style: {
-        flex: 1,
-        minWidth: 220
-      },
-      children: [/*#__PURE__*/_jsxDEV("input", {
-        className: "tp-in",
-        value: board.meta.team,
-        onChange: e => set({
-          meta: {
-            ...board.meta,
-            team: e.target.value
-          }
-        }),
-        style: {
-          border: "none",
-          padding: 0,
-          fontSize: 18,
-          fontWeight: 700,
-          color: t.ink
-        }
-      }, void 0, false), /*#__PURE__*/_jsxDEV("div", {
-        style: {
-          display: "flex",
-          alignItems: "center",
-          gap: 10,
-          marginTop: 2,
-          fontSize: 13,
-          color: t.muted,
-          flexWrap: "wrap"
-        },
-        children: [/*#__PURE__*/_jsxDEV("span", {
-          children: ["Week of ", /*#__PURE__*/_jsxDEV("input", {
-            type: "date",
-            value: board.meta.weekOf,
-            onChange: e => set({
-              meta: {
-                ...board.meta,
-                weekOf: e.target.value
-              }
-            }),
-            style: {
-              border: "none",
-              font: "inherit",
-              color: t.body,
-              background: "transparent"
-            }
-          }, void 0, false)]
-        }, void 0, true), /*#__PURE__*/_jsxDEV("span", {
-          style: {
-            color: t.border
-          },
-          children: "|"
-        }, void 0, false), /*#__PURE__*/_jsxDEV("span", {
-          children: ["Last updated ", /*#__PURE__*/_jsxDEV("strong", {
-            style: {
-              color: t.body,
-              fontWeight: 600
-            },
-            children: fmtWhen(board.meta.lastUpdated)
-          }, void 0, false)]
-        }, void 0, true), /*#__PURE__*/_jsxDEV("span", {
-          style: {
-            color: t.border
-          },
-          children: "|"
-        }, void 0, false), /*#__PURE__*/_jsxDEV("span", {
-          children: ["Build ", /*#__PURE__*/_jsxDEV("strong", {
-            style: {
-              color: t.body,
-              fontWeight: 600
-            },
-            children: ["v", APP_VERSION]
-          }, void 0, true)]
-        }, void 0, true)]
-      }, void 0, true)]
-    }, void 0, true), /*#__PURE__*/_jsxDEV("button", {
-      onClick: exportXlsx,
-      className: "tp-ghost",
-      style: {
-        ...btnGhost,
-        display: "flex",
-        alignItems: "center",
-        gap: 7
-      },
-      children: [/*#__PURE__*/_jsxDEV(Icon, {
-        name: "download",
-        size: 15
-      }, void 0, false), " Export to Excel"]
-    }, void 0, true), /*#__PURE__*/_jsxDEV("button", {
-      onClick: saveBackup,
-      className: "tp-ghost",
-      style: {
-        ...btnGhost,
-        display: "flex",
-        alignItems: "center",
-        gap: 7
-      },
-      children: [/*#__PURE__*/_jsxDEV(Icon, {
-        name: "save",
-        size: 15
-      }, void 0, false), " Save backup"]
-    }, void 0, true), /*#__PURE__*/_jsxDEV("button", {
-      onClick: () => fileRef.current && fileRef.current.click(),
-      className: "tp-ghost",
-      style: {
-        ...btnGhost,
-        display: "flex",
-        alignItems: "center",
-        gap: 7
-      },
-      children: [/*#__PURE__*/_jsxDEV(Icon, {
-        name: "upload",
-        size: 15
-      }, void 0, false), " Restore"]
-    }, void 0, true), /*#__PURE__*/_jsxDEV("input", {
-      ref: fileRef,
-      type: "file",
-      accept: "application/json,.json",
-      onChange: restore,
-      style: {
-        display: "none"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minWidth: 220
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    className: "tp-in",
+    value: board.meta.team,
+    onChange: e => set({
+      meta: {
+        ...board.meta,
+        team: e.target.value
       }
-    }, void 0, false), /*#__PURE__*/_jsxDEV("button", {
-      onClick: reset,
-      className: "tp-ghost",
-      style: {
-        ...btnGhost,
-        color: t.muted,
-        display: "flex",
-        alignItems: "center",
-        gap: 7
-      },
-      children: [/*#__PURE__*/_jsxDEV(Icon, {
-        name: "reset",
-        size: 14
-      }, void 0, false), " Reset"]
-    }, void 0, true)]
-  }, void 0, true);
+    }),
+    style: {
+      border: "none",
+      padding: 0,
+      fontSize: 18,
+      fontWeight: 700,
+      color: t.ink
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 10,
+      marginTop: 2,
+      fontSize: 13,
+      color: t.muted,
+      flexWrap: "wrap"
+    }
+  }, /*#__PURE__*/React.createElement("span", null, "Week of ", /*#__PURE__*/React.createElement("input", {
+    type: "date",
+    value: board.meta.weekOf,
+    onChange: e => set({
+      meta: {
+        ...board.meta,
+        weekOf: e.target.value
+      }
+    }),
+    style: {
+      border: "none",
+      font: "inherit",
+      color: t.body,
+      background: "transparent"
+    }
+  })), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: t.border
+    }
+  }, "|"), /*#__PURE__*/React.createElement("span", null, "Last updated ", /*#__PURE__*/React.createElement("strong", {
+    style: {
+      color: t.body,
+      fontWeight: 600
+    }
+  }, fmtWhen(board.meta.lastUpdated))), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: t.border
+    }
+  }, "|"), /*#__PURE__*/React.createElement("span", null, "Build ", /*#__PURE__*/React.createElement("strong", {
+    style: {
+      color: t.body,
+      fontWeight: 600
+    }
+  }, "v", APP_VERSION)))), /*#__PURE__*/React.createElement("button", {
+    onClick: exportXlsx,
+    className: "tp-ghost",
+    style: {
+      ...btnGhost,
+      display: "flex",
+      alignItems: "center",
+      gap: 7
+    }
+  }, /*#__PURE__*/React.createElement(Icon, {
+    name: "download",
+    size: 15
+  }), " Export"), /*#__PURE__*/React.createElement("button", {
+    onClick: saveBackup,
+    className: "tp-ghost",
+    style: {
+      ...btnGhost,
+      display: "flex",
+      alignItems: "center",
+      gap: 7
+    }
+  }, /*#__PURE__*/React.createElement(Icon, {
+    name: "save",
+    size: 15
+  }), " Backup"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => fileRef.current && fileRef.current.click(),
+    className: "tp-ghost",
+    style: {
+      ...btnGhost,
+      display: "flex",
+      alignItems: "center",
+      gap: 7
+    }
+  }, /*#__PURE__*/React.createElement(Icon, {
+    name: "upload",
+    size: 15
+  }), " Restore"), /*#__PURE__*/React.createElement("input", {
+    ref: fileRef,
+    type: "file",
+    accept: "application/json,.json",
+    onChange: restore,
+    style: {
+      display: "none"
+    }
+  }), /*#__PURE__*/React.createElement("button", {
+    onClick: reset,
+    className: "tp-ghost",
+    style: {
+      ...btnGhost,
+      color: t.muted,
+      display: "flex",
+      alignItems: "center",
+      gap: 7
+    }
+  }, /*#__PURE__*/React.createElement(Icon, {
+    name: "reset",
+    size: 14
+  }), " Reset"));
 }
 
-/* ----------------------------- Overview ---------------------------- */
+/* Overview (unchanged behaviour) */
 function Overview({
   board,
   set,
@@ -1706,7 +1394,7 @@ function Overview({
   const gen = async () => {
     setLoading(true);
     try {
-      const out = await callClaude("Here is this week's team operating board:\n\n" + boardToText(board) + "\n\nGive a tight executive read-out: 2–3 sentences on overall health, then 3–4 prioritised recommendations. Focus on anything Red or Amber and on overdue actions. Short plain sentences, no headers.", "You are a sharp chief-of-staff reviewing a partnerships team's weekly L10 board. Be concise, commercial and actionable.");
+      const out = await callClaude("Board:\n\n" + boardToText(board) + "\n\nGive a 2–3 sentence health read-out then 3–4 prioritised recommendations focused on Red/Amber and overdue. Short sentences, no headers.", "You are a sharp chief-of-staff. Concise, commercial, actionable.");
       set({
         meta: {
           ...board.meta,
@@ -1738,206 +1426,187 @@ function Overview({
     kind: "Issue",
     name: i.title
   }))].filter(x => x.rag !== "G").sort((a, b) => (a.rag === "R" ? 0 : 1) - (b.rag === "R" ? 0 : 1));
-  return /*#__PURE__*/_jsxDEV("div", {
-    children: [/*#__PURE__*/_jsxDEV(SectionTitle, {
-      sub: "A one-glance read on where the team stands this week.",
-      children: "Overview"
-    }, void 0, false), /*#__PURE__*/_jsxDEV("div", {
-      style: {
-        display: "grid",
-        gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))",
-        gap: 12,
-        marginBottom: 18
-      },
-      children: [/*#__PURE__*/_jsxDEV(HealthTile, {
-        n: counts.G,
-        label: "On track",
-        c: t.green
-      }, void 0, false), /*#__PURE__*/_jsxDEV(HealthTile, {
-        n: counts.A,
-        label: "At risk",
-        c: t.amber
-      }, void 0, false), /*#__PURE__*/_jsxDEV(HealthTile, {
-        n: counts.R,
-        label: "Off track",
-        c: t.red
-      }, void 0, false), /*#__PURE__*/_jsxDEV(HealthTile, {
-        n: board.issues.length,
-        label: "Open issues",
-        c: t.navy,
-        onClick: () => setView("issues")
-      }, void 0, false), /*#__PURE__*/_jsxDEV(HealthTile, {
-        n: `${openTodos}${overdue ? ` · ${overdue} late` : ""}`,
-        label: "To-dos open",
-        c: overdue ? t.red : t.navy,
-        onClick: () => setView("todos")
-      }, void 0, false)]
-    }, void 0, true), /*#__PURE__*/_jsxDEV("div", {
-      style: card,
-      children: [/*#__PURE__*/_jsxDEV("div", {
-        style: {
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          marginBottom: 8,
-          flexWrap: "wrap",
-          gap: 8
-        },
-        children: [/*#__PURE__*/_jsxDEV("div", {
-          style: {
-            display: "flex",
-            alignItems: "center",
-            gap: 8,
-            fontWeight: 700,
-            color: t.ink,
-            fontSize: 15
-          },
-          children: [/*#__PURE__*/_jsxDEV(Icon, {
-            name: "sparkles",
-            size: 16,
-            color: t.red
-          }, void 0, false), " Recommendations & commentary"]
-        }, void 0, true), /*#__PURE__*/_jsxDEV("div", {
-          style: {
-            display: "flex",
-            gap: 8,
-            alignItems: "center"
-          },
-          children: [/*#__PURE__*/_jsxDEV("button", {
-            onClick: () => setShowKey(s => !s),
-            className: "tp-ghost",
-            style: {
-              ...btnGhost,
-              padding: "7px 10px",
-              fontSize: 12.5
-            },
-            children: "AI settings"
-          }, void 0, false), /*#__PURE__*/_jsxDEV("button", {
-            onClick: gen,
-            disabled: loading,
-            className: "tp-primary",
-            style: {
-              ...btnPrimary,
-              display: "flex",
-              alignItems: "center",
-              gap: 7,
-              opacity: loading ? 0.7 : 1
-            },
-            children: [loading ? /*#__PURE__*/_jsxDEV(Icon, {
-              name: "loader",
-              size: 14
-            }, void 0, false) : /*#__PURE__*/_jsxDEV(Icon, {
-              name: "sparkles",
-              size: 14
-            }, void 0, false), loading ? "Reviewing…" : "Generate with AI"]
-          }, void 0, true)]
-        }, void 0, true)]
-      }, void 0, true), showKey && /*#__PURE__*/_jsxDEV("div", {
-        style: {
-          ...notice(t.navy, "#EEF1F6"),
-          display: "flex",
-          gap: 8,
-          alignItems: "center",
-          flexWrap: "wrap"
-        },
-        children: [/*#__PURE__*/_jsxDEV("span", {
-          style: {
-            fontSize: 12.5
-          },
-          children: "Optional Anthropic API key (stored only in this browser) to enable AI generation:"
-        }, void 0, false), /*#__PURE__*/_jsxDEV("input", {
-          className: "tp-in",
-          type: "password",
-          value: key,
-          onChange: e => setKey(e.target.value),
-          placeholder: "sk-ant-…",
-          style: {
-            maxWidth: 280
-          }
-        }, void 0, false), /*#__PURE__*/_jsxDEV("button", {
-          onClick: saveKey,
-          className: "tp-primary",
-          style: {
-            ...btnPrimary,
-            padding: "7px 12px"
-          },
-          children: "Save"
-        }, void 0, false)]
-      }, void 0, true), /*#__PURE__*/_jsxDEV("textarea", {
-        className: "tp-in",
-        value: board.meta.commentaryText || "",
-        onChange: e => set({
-          meta: {
-            ...board.meta,
-            commentaryText: e.target.value
-          }
-        }),
-        rows: 5,
-        placeholder: "Type this week's commentary here, or generate it with AI…",
-        style: {
-          resize: "vertical",
-          fontSize: 14,
-          lineHeight: 1.55
-        }
-      }, void 0, false)]
-    }, void 0, true), /*#__PURE__*/_jsxDEV("div", {
-      style: {
-        ...card,
-        marginTop: 16
-      },
-      children: [/*#__PURE__*/_jsxDEV("div", {
-        style: {
-          fontWeight: 700,
-          color: t.ink,
-          fontSize: 15,
-          marginBottom: 10
-        },
-        children: "Needs attention"
-      }, void 0, false), attention.map(x => /*#__PURE__*/_jsxDEV("div", {
-        className: "tp-row",
-        style: {
-          display: "flex",
-          alignItems: "center",
-          gap: 10,
-          padding: "9px 6px",
-          borderBottom: `1px solid ${t.borderSoft}`
-        },
-        children: [/*#__PURE__*/_jsxDEV(Dot, {
-          rag: x.rag
-        }, void 0, false), /*#__PURE__*/_jsxDEV("span", {
-          style: {
-            fontSize: 11,
-            color: t.muted,
-            width: 52,
-            textTransform: "uppercase",
-            letterSpacing: 0.5,
-            flexShrink: 0
-          },
-          children: x.kind
-        }, void 0, false), /*#__PURE__*/_jsxDEV("span", {
-          style: {
-            color: t.ink,
-            fontSize: 14
-          },
-          children: x.name.length > 90 ? x.name.slice(0, 90) + "…" : x.name
-        }, void 0, false), x.owner && /*#__PURE__*/_jsxDEV("span", {
-          style: {
-            marginLeft: "auto",
-            fontSize: 12,
-            color: t.muted,
-            flexShrink: 0
-          },
-          children: x.owner
-        }, void 0, false)]
-      }, x.kind + x.id, true)), attention.length === 0 && /*#__PURE__*/_jsxDEV("div", {
-        style: {
-          color: t.green,
-          fontSize: 14
-        },
-        children: "Everything's green. Nice week."
-      }, void 0, false)]
-    }, void 0, true)]
-  }, void 0, true);
+  return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement(SectionTitle, {
+    sub: "A one-glance read on where the team stands this week."
+  }, "Overview"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))",
+      gap: 12,
+      marginBottom: 18
+    }
+  }, /*#__PURE__*/React.createElement(HealthTile, {
+    n: counts.G,
+    label: "On track",
+    c: t.green
+  }), /*#__PURE__*/React.createElement(HealthTile, {
+    n: counts.A,
+    label: "At risk",
+    c: t.amber
+  }), /*#__PURE__*/React.createElement(HealthTile, {
+    n: counts.R,
+    label: "Off track",
+    c: t.red
+  }), /*#__PURE__*/React.createElement(HealthTile, {
+    n: board.issues.length,
+    label: "Open issues",
+    c: t.navy,
+    onClick: () => setView("issues")
+  }), /*#__PURE__*/React.createElement(HealthTile, {
+    n: `${openTodos}${overdue ? ` · ${overdue} late` : ""}`,
+    label: "To-dos open",
+    c: overdue ? t.red : t.navy,
+    onClick: () => setView("todos")
+  })), /*#__PURE__*/React.createElement("div", {
+    style: card
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "space-between",
+      marginBottom: 8,
+      flexWrap: "wrap",
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 8,
+      fontWeight: 700,
+      color: t.ink,
+      fontSize: 15
+    }
+  }, /*#__PURE__*/React.createElement(Icon, {
+    name: "sparkles",
+    size: 16,
+    color: t.red
+  }), " Recommendations & commentary"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8,
+      alignItems: "center"
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setShowKey(s => !s),
+    className: "tp-ghost",
+    style: {
+      ...btnGhost,
+      padding: "7px 10px",
+      fontSize: 12.5
+    }
+  }, "AI settings"), /*#__PURE__*/React.createElement("button", {
+    onClick: gen,
+    disabled: loading,
+    className: "tp-primary",
+    style: {
+      ...btnPrimary,
+      display: "flex",
+      alignItems: "center",
+      gap: 7,
+      opacity: loading ? 0.7 : 1
+    }
+  }, loading ? /*#__PURE__*/React.createElement(Icon, {
+    name: "loader",
+    size: 14
+  }) : /*#__PURE__*/React.createElement(Icon, {
+    name: "sparkles",
+    size: 14
+  }), loading ? "Reviewing…" : "Generate with AI"))), showKey && /*#__PURE__*/React.createElement("div", {
+    style: {
+      ...notice(t.navy, "#EEF1F6"),
+      display: "flex",
+      gap: 8,
+      alignItems: "center",
+      flexWrap: "wrap"
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 12.5
+    }
+  }, "Optional Anthropic API key (this browser only):"), /*#__PURE__*/React.createElement("input", {
+    className: "tp-in",
+    type: "password",
+    value: key,
+    onChange: e => setKey(e.target.value),
+    placeholder: "sk-ant-…",
+    style: {
+      maxWidth: 280
+    }
+  }), /*#__PURE__*/React.createElement("button", {
+    onClick: saveKey,
+    className: "tp-primary",
+    style: {
+      ...btnPrimary,
+      padding: "7px 12px"
+    }
+  }, "Save")), /*#__PURE__*/React.createElement("textarea", {
+    className: "tp-in",
+    value: board.meta.commentaryText || "",
+    onChange: e => set({
+      meta: {
+        ...board.meta,
+        commentaryText: e.target.value
+      }
+    }),
+    rows: 5,
+    placeholder: "Type this week's commentary, or generate it with AI…",
+    style: {
+      resize: "vertical",
+      fontSize: 14,
+      lineHeight: 1.55
+    }
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      ...card,
+      marginTop: 16
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontWeight: 700,
+      color: t.ink,
+      fontSize: 15,
+      marginBottom: 10
+    }
+  }, "Needs attention"), attention.map(x => /*#__PURE__*/React.createElement("div", {
+    key: x.kind + x.id,
+    className: "tp-row",
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 10,
+      padding: "9px 6px",
+      borderBottom: `1px solid ${t.borderSoft}`
+    }
+  }, /*#__PURE__*/React.createElement(Dot, {
+    rag: x.rag
+  }), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 11,
+      color: t.muted,
+      width: 52,
+      textTransform: "uppercase",
+      letterSpacing: 0.5,
+      flexShrink: 0
+    }
+  }, x.kind), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: t.ink,
+      fontSize: 14
+    }
+  }, x.name.length > 90 ? x.name.slice(0, 90) + "…" : x.name), x.owner && /*#__PURE__*/React.createElement("span", {
+    style: {
+      marginLeft: "auto",
+      fontSize: 12,
+      color: t.muted,
+      flexShrink: 0
+    }
+  }, x.owner))), attention.length === 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: t.green,
+      fontSize: 14
+    }
+  }, "Everything's green. Nice week.")));
 }
 function HealthTile({
   n,
@@ -1945,7 +1614,7 @@ function HealthTile({
   c,
   onClick
 }) {
-  return /*#__PURE__*/_jsxDEV("div", {
+  return /*#__PURE__*/React.createElement("div", {
     onClick: onClick,
     style: {
       background: t.card,
@@ -1955,69 +1624,63 @@ function HealthTile({
       cursor: onClick ? "pointer" : "default",
       position: "relative",
       overflow: "hidden"
-    },
-    children: [/*#__PURE__*/_jsxDEV("div", {
-      style: {
-        position: "absolute",
-        left: 0,
-        top: 0,
-        bottom: 0,
-        width: 4,
-        background: c
-      }
-    }, void 0, false), /*#__PURE__*/_jsxDEV("div", {
-      style: {
-        fontSize: 30,
-        fontWeight: 800,
-        color: t.ink,
-        lineHeight: 1
-      },
-      children: n
-    }, void 0, false), /*#__PURE__*/_jsxDEV("div", {
-      style: {
-        fontSize: 12.5,
-        color: t.muted,
-        marginTop: 6
-      },
-      children: label
-    }, void 0, false)]
-  }, void 0, true);
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      position: "absolute",
+      left: 0,
+      top: 0,
+      bottom: 0,
+      width: 4,
+      background: c
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 30,
+      fontWeight: 800,
+      color: t.ink,
+      lineHeight: 1
+    }
+  }, n), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12.5,
+      color: t.muted,
+      marginTop: 6
+    }
+  }, label));
 }
 
-/* ----------------------------- shared ------------------------------ */
+/* shared bits */
 function SectionTitle({
   children,
   sub
 }) {
-  return /*#__PURE__*/_jsxDEV("div", {
+  return /*#__PURE__*/React.createElement("div", {
     style: {
       marginBottom: 16
-    },
-    children: [/*#__PURE__*/_jsxDEV("h1", {
-      style: {
-        margin: 0,
-        fontSize: 24,
-        fontWeight: 800,
-        color: t.ink,
-        letterSpacing: -0.3
-      },
-      children: children
-    }, void 0, false), sub && /*#__PURE__*/_jsxDEV("div", {
-      style: {
-        color: t.muted,
-        fontSize: 14,
-        marginTop: 3
-      },
-      children: sub
-    }, void 0, false)]
-  }, void 0, true);
+    }
+  }, /*#__PURE__*/React.createElement("h1", {
+    style: {
+      margin: 0,
+      fontSize: 24,
+      fontWeight: 800,
+      color: t.ink,
+      letterSpacing: -0.3
+    }
+  }, children), sub && /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: t.muted,
+      fontSize: 14,
+      marginTop: 3
+    }
+  }, sub));
 }
 function RagChip({
   value,
   onChange
 }) {
   const r = RAG[value];
-  return /*#__PURE__*/_jsxDEV("button", {
+  return /*#__PURE__*/React.createElement("button", {
     onClick: () => onChange(nextRag(value)),
     title: "Click to change status",
     className: "tp-chipbtn",
@@ -2035,21 +1698,20 @@ function RagChip({
       fontSize: 12.5,
       fontWeight: 600,
       whiteSpace: "nowrap"
-    },
-    children: [/*#__PURE__*/_jsxDEV("span", {
-      style: {
-        width: 8,
-        height: 8,
-        borderRadius: 8,
-        background: r.c
-      }
-    }, void 0, false), " ", r.label]
-  }, void 0, true);
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      width: 8,
+      height: 8,
+      borderRadius: 8,
+      background: r.c
+    }
+  }), " ", r.label);
 }
 function Dot({
   rag
 }) {
-  return /*#__PURE__*/_jsxDEV("span", {
+  return /*#__PURE__*/React.createElement("span", {
     style: {
       width: 9,
       height: 9,
@@ -2057,7 +1719,7 @@ function Dot({
       background: RAG[rag].c,
       flexShrink: 0
     }
-  }, void 0, false);
+  });
 }
 const card = {
   background: t.card,
@@ -2141,7 +1803,7 @@ function Cell({
   right,
   placeholder
 }) {
-  return /*#__PURE__*/_jsxDEV("input", {
+  return /*#__PURE__*/React.createElement("input", {
     className: "tp-in",
     type: type,
     value: value,
@@ -2151,64 +1813,126 @@ function Cell({
       width: w || "100%",
       textAlign: right ? "right" : "left"
     }
-  }, void 0, false);
+  });
 }
 function DelBtn({
   onClick,
   title = "Remove"
 }) {
-  return /*#__PURE__*/_jsxDEV("span", {
+  return /*#__PURE__*/React.createElement("span", {
     className: "tp-icon",
     onClick: onClick,
-    title: title,
-    children: /*#__PURE__*/_jsxDEV(Icon, {
-      name: "trash",
-      size: 15
-    }, void 0, false)
-  }, void 0, false);
+    title: title
+  }, /*#__PURE__*/React.createElement(Icon, {
+    name: "trash",
+    size: 15
+  }));
 }
 function ArchiveBtn({
   onClick
 }) {
-  return /*#__PURE__*/_jsxDEV("span", {
+  return /*#__PURE__*/React.createElement("span", {
     className: "tp-icon",
     onClick: onClick,
-    title: "Move to archive",
-    children: /*#__PURE__*/_jsxDEV(Icon, {
-      name: "archive",
-      size: 15
-    }, void 0, false)
-  }, void 0, false);
+    title: "Move to archive"
+  }, /*#__PURE__*/React.createElement(Icon, {
+    name: "archive",
+    size: 15
+  }));
 }
 function MoveBtn({
   onClick,
   icon,
   title
 }) {
-  return /*#__PURE__*/_jsxDEV("span", {
+  return /*#__PURE__*/React.createElement("span", {
     className: "tp-icon",
     onClick: onClick,
-    title: title,
-    children: /*#__PURE__*/_jsxDEV(Icon, {
-      name: icon,
-      size: 15
-    }, void 0, false)
-  }, void 0, false);
+    title: title
+  }, /*#__PURE__*/React.createElement(Icon, {
+    name: icon,
+    size: 15
+  }));
+}
+function EditToggle({
+  on,
+  onClick
+}) {
+  return /*#__PURE__*/React.createElement("span", {
+    className: "tp-icon",
+    onClick: onClick,
+    title: on ? "Finish editing" : "Edit details",
+    style: {
+      color: on ? t.green : t.muted
+    }
+  }, /*#__PURE__*/React.createElement(Icon, {
+    name: on ? "done" : "pencil",
+    size: 16
+  }));
+}
+function OwnerSelect({
+  value,
+  onChange,
+  w
+}) {
+  return /*#__PURE__*/React.createElement("select", {
+    className: "tp-in",
+    value: value || "",
+    onChange: e => onChange(e.target.value),
+    style: {
+      width: w || 130
+    }
+  }, OWNERS.map(o => /*#__PURE__*/React.createElement("option", {
+    key: o,
+    value: o
+  }, o || "—")));
+}
+function Locked({
+  label,
+  value
+}) {
+  return /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 13,
+      color: t.body
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: t.muted
+    }
+  }, label, ": "), /*#__PURE__*/React.createElement("strong", {
+    style: {
+      color: t.ink,
+      fontWeight: 600
+    }
+  }, value || "—"));
+}
+function Stamp({
+  at,
+  verb = "updated"
+}) {
+  if (!at) return null;
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: t.muted,
+      marginTop: 4
+    }
+  }, verb, " ", fmtWhen(at));
 }
 
-/* --------------------------- Spark + Trend ------------------------- */
+/* Spark + Trend */
 function Spark({
   history,
   color
 }) {
   const vals = history.map(h => num(h.value)).filter(v => !isNaN(v));
-  if (vals.length < 2) return /*#__PURE__*/_jsxDEV("span", {
+  if (vals.length < 2) return /*#__PURE__*/React.createElement("span", {
     style: {
       color: t.muted,
       fontSize: 12
-    },
-    children: "—"
-  }, void 0, false);
+    }
+  }, "—");
   const w = 96,
     h = 26,
     min = Math.min(...vals),
@@ -2216,21 +1940,20 @@ function Spark({
     rng = max - min || 1;
   const pts = vals.map((v, i) => `${i / (vals.length - 1) * (w - 2) + 1},${h - 2 - (v - min) / rng * (h - 4)}`).join(" ");
   const up = vals[vals.length - 1] >= vals[0];
-  return /*#__PURE__*/_jsxDEV("svg", {
+  return /*#__PURE__*/React.createElement("svg", {
     width: w,
     height: h,
     style: {
       display: "block"
-    },
-    children: /*#__PURE__*/_jsxDEV("polyline", {
-      points: pts,
-      fill: "none",
-      stroke: color || (up ? t.green : t.red),
-      strokeWidth: "1.6",
-      strokeLinejoin: "round",
-      strokeLinecap: "round"
-    }, void 0, false)
-  }, void 0, false);
+    }
+  }, /*#__PURE__*/React.createElement("polyline", {
+    points: pts,
+    fill: "none",
+    stroke: color || (up ? t.green : t.red),
+    strokeWidth: "1.6",
+    strokeLinejoin: "round",
+    strokeLinecap: "round"
+  }));
 }
 function Trend({
   history,
@@ -2241,14 +1964,13 @@ function Trend({
     week: h.week,
     v: num(h.value)
   })).filter(d => !isNaN(d.v));
-  if (data.length < 2) return /*#__PURE__*/_jsxDEV("div", {
+  if (data.length < 2) return /*#__PURE__*/React.createElement("div", {
     style: {
       color: t.muted,
       fontSize: 13,
       padding: "12px 0"
-    },
-    children: "Not enough data points yet to plot a trend."
-  }, void 0, false);
+    }
+  }, "Not enough data points yet to plot a trend.");
   const W = 620,
     H = 200,
     padL = 52,
@@ -2270,91 +1992,78 @@ function Trend({
   const y = v => padT + (1 - (v - min) / (max - min)) * (H - padT - padB);
   const line = data.map((d, i) => `${x(i)},${y(d.v)}`).join(" ");
   const fmt = v => Math.abs(v) >= 1000 ? Math.round(v).toLocaleString() : Math.abs(v) < 1 ? v.toFixed(3) : String(Math.round(v * 100) / 100);
-  return /*#__PURE__*/_jsxDEV("svg", {
+  return /*#__PURE__*/React.createElement("svg", {
     width: "100%",
     viewBox: `0 0 ${W} ${H}`,
     style: {
       display: "block"
-    },
-    children: [/*#__PURE__*/_jsxDEV("line", {
-      x1: padL,
-      y1: padT,
-      x2: padL,
-      y2: H - padB,
-      stroke: t.border,
-      strokeWidth: "1"
-    }, void 0, false), /*#__PURE__*/_jsxDEV("line", {
-      x1: padL,
-      y1: H - padB,
-      x2: W - padR,
-      y2: H - padB,
-      stroke: t.border,
-      strokeWidth: "1"
-    }, void 0, false), /*#__PURE__*/_jsxDEV("text", {
-      x: padL - 6,
-      y: y(max) + 4,
-      textAnchor: "end",
-      fontSize: "10",
-      fill: t.muted,
-      children: fmt(max)
-    }, void 0, false), /*#__PURE__*/_jsxDEV("text", {
-      x: padL - 6,
-      y: y(min) + 4,
-      textAnchor: "end",
-      fontSize: "10",
-      fill: t.muted,
-      children: fmt(min)
-    }, void 0, false), !isNaN(tgt) && tgt >= min && tgt <= max && /*#__PURE__*/_jsxDEV("g", {
-      children: [/*#__PURE__*/_jsxDEV("line", {
-        x1: padL,
-        y1: y(tgt),
-        x2: W - padR,
-        y2: y(tgt),
-        stroke: t.amber,
-        strokeWidth: "1",
-        strokeDasharray: "4 3"
-      }, void 0, false), /*#__PURE__*/_jsxDEV("text", {
-        x: W - padR,
-        y: y(tgt) - 4,
-        textAnchor: "end",
-        fontSize: "10",
-        fill: t.amber,
-        children: ["target ", fmt(tgt)]
-      }, void 0, true)]
-    }, void 0, true), /*#__PURE__*/_jsxDEV("polyline", {
-      points: line,
-      fill: "none",
-      stroke: color || t.navy,
-      strokeWidth: "2",
-      strokeLinejoin: "round",
-      strokeLinecap: "round"
-    }, void 0, false), data.map((d, i) => /*#__PURE__*/_jsxDEV("circle", {
-      cx: x(i),
-      cy: y(d.v),
-      r: "3",
-      fill: color || t.navy,
-      children: /*#__PURE__*/_jsxDEV("title", {
-        children: [d.week, ": ", fmtVal(d.v)]
-      }, void 0, true)
-    }, i, false)), /*#__PURE__*/_jsxDEV("text", {
-      x: padL,
-      y: H - padB + 16,
-      textAnchor: "start",
-      fontSize: "10",
-      fill: t.muted,
-      children: data[0].week.slice(5)
-    }, void 0, false), /*#__PURE__*/_jsxDEV("text", {
-      x: W - padR,
-      y: H - padB + 16,
-      textAnchor: "end",
-      fontSize: "10",
-      fill: t.muted,
-      children: data[data.length - 1].week.slice(5)
-    }, void 0, false)]
-  }, void 0, true);
+    }
+  }, /*#__PURE__*/React.createElement("line", {
+    x1: padL,
+    y1: padT,
+    x2: padL,
+    y2: H - padB,
+    stroke: t.border
+  }), /*#__PURE__*/React.createElement("line", {
+    x1: padL,
+    y1: H - padB,
+    x2: W - padR,
+    y2: H - padB,
+    stroke: t.border
+  }), /*#__PURE__*/React.createElement("text", {
+    x: padL - 6,
+    y: y(max) + 4,
+    textAnchor: "end",
+    fontSize: "10",
+    fill: t.muted
+  }, fmt(max)), /*#__PURE__*/React.createElement("text", {
+    x: padL - 6,
+    y: y(min) + 4,
+    textAnchor: "end",
+    fontSize: "10",
+    fill: t.muted
+  }, fmt(min)), !isNaN(tgt) && tgt >= min && tgt <= max && /*#__PURE__*/React.createElement("g", null, /*#__PURE__*/React.createElement("line", {
+    x1: padL,
+    y1: y(tgt),
+    x2: W - padR,
+    y2: y(tgt),
+    stroke: t.amber,
+    strokeWidth: "1",
+    strokeDasharray: "4 3"
+  }), /*#__PURE__*/React.createElement("text", {
+    x: W - padR,
+    y: y(tgt) - 4,
+    textAnchor: "end",
+    fontSize: "10",
+    fill: t.amber
+  }, "target ", fmt(tgt))), /*#__PURE__*/React.createElement("polyline", {
+    points: line,
+    fill: "none",
+    stroke: color || t.navy,
+    strokeWidth: "2",
+    strokeLinejoin: "round",
+    strokeLinecap: "round"
+  }), data.map((d, i) => /*#__PURE__*/React.createElement("circle", {
+    key: i,
+    cx: x(i),
+    cy: y(d.v),
+    r: "3",
+    fill: color || t.navy
+  }, /*#__PURE__*/React.createElement("title", null, d.week, ": ", fmtVal(d.v)))), /*#__PURE__*/React.createElement("text", {
+    x: padL,
+    y: H - padB + 16,
+    fontSize: "10",
+    fill: t.muted
+  }, data[0].week.slice(5)), /*#__PURE__*/React.createElement("text", {
+    x: W - padR,
+    y: H - padB + 16,
+    textAnchor: "end",
+    fontSize: "10",
+    fill: t.muted
+  }, data[data.length - 1].week.slice(5)));
 }
 
-/* ----------------------------- Scorecard --------------------------- */
+/* Scorecard: Target locked in row (editable in expand) + Cumulative column */
 function WeeklyEntry({
   defaultWeek,
   onSave
@@ -2367,7 +2076,7 @@ function WeeklyEntry({
   const submit = () => {
     if (onSave(wk, val)) setVal("");
   };
-  return /*#__PURE__*/_jsxDEV("div", {
+  return /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       gap: 8,
@@ -2377,49 +2086,46 @@ function WeeklyEntry({
       border: `1px solid ${t.border}`,
       borderRadius: 8,
       padding: "10px 12px"
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 12,
+      color: t.muted,
+      fontWeight: 600
+    }
+  }, "Record a value:"), /*#__PURE__*/React.createElement("input", {
+    className: "tp-in",
+    type: "date",
+    value: wk,
+    onChange: e => setWk(e.target.value),
+    style: {
+      width: 150
+    }
+  }), /*#__PURE__*/React.createElement("input", {
+    className: "tp-in",
+    value: val,
+    onChange: e => setVal(e.target.value),
+    onKeyDown: e => {
+      if (e.key === "Enter") submit();
     },
-    children: [/*#__PURE__*/_jsxDEV("span", {
-      style: {
-        fontSize: 12,
-        color: t.muted,
-        fontWeight: 600
-      },
-      children: "Record a value:"
-    }, void 0, false), /*#__PURE__*/_jsxDEV("input", {
-      className: "tp-in",
-      type: "date",
-      value: wk,
-      onChange: e => setWk(e.target.value),
-      style: {
-        width: 150
-      }
-    }, void 0, false), /*#__PURE__*/_jsxDEV("input", {
-      className: "tp-in",
-      value: val,
-      onChange: e => setVal(e.target.value),
-      onKeyDown: e => {
-        if (e.key === "Enter") submit();
-      },
-      placeholder: "Value",
-      style: {
-        width: 120,
-        textAlign: "right"
-      }
-    }, void 0, false), /*#__PURE__*/_jsxDEV("button", {
-      onClick: submit,
-      className: "tp-primary",
-      style: {
-        ...btnPrimary,
-        display: "flex",
-        alignItems: "center",
-        gap: 6
-      },
-      children: [/*#__PURE__*/_jsxDEV(Icon, {
-        name: "save",
-        size: 14
-      }, void 0, false), " Save"]
-    }, void 0, true)]
-  }, void 0, true);
+    placeholder: "Value",
+    style: {
+      width: 120,
+      textAlign: "right"
+    }
+  }), /*#__PURE__*/React.createElement("button", {
+    onClick: submit,
+    className: "tp-primary",
+    style: {
+      ...btnPrimary,
+      display: "flex",
+      alignItems: "center",
+      gap: 6
+    }
+  }, /*#__PURE__*/React.createElement(Icon, {
+    name: "save",
+    size: 14
+  }), " Save"));
 }
 function Metrics({
   board,
@@ -2460,7 +2166,7 @@ function Metrics({
       return false;
     }
     if (value === "" || isNaN(num(value))) {
-      toast("Enter a number for the value");
+      toast("Enter a number");
       return false;
     }
     const exists = m.history.some(h => h.week === week);
@@ -2490,261 +2196,254 @@ function Metrics({
     });
     toast("Entry deleted");
   };
-  return /*#__PURE__*/_jsxDEV("div", {
-    children: [/*#__PURE__*/_jsxDEV(SectionTitle, {
-      sub: "Weekly numbers with trend history. Record a value for the week — if one already exists it updates rather than duplicating. Expand a metric to edit or delete entries.",
-      children: "Scorecard"
-    }, void 0, false), /*#__PURE__*/_jsxDEV("div", {
-      style: card,
-      children: [/*#__PURE__*/_jsxDEV("div", {
-        style: {
-          overflowX: "auto"
-        },
-        children: /*#__PURE__*/_jsxDEV("table", {
-          style: {
-            width: "100%",
-            borderCollapse: "collapse",
-            minWidth: 640
-          },
-          children: [/*#__PURE__*/_jsxDEV("thead", {
-            children: /*#__PURE__*/_jsxDEV("tr", {
-              children: [/*#__PURE__*/_jsxDEV("th", {
-                style: th,
-                children: "Metric"
-              }, void 0, false), /*#__PURE__*/_jsxDEV("th", {
-                style: th,
-                children: "Owner"
-              }, void 0, false), /*#__PURE__*/_jsxDEV("th", {
-                style: th,
-                children: "Target"
-              }, void 0, false), /*#__PURE__*/_jsxDEV("th", {
-                style: th,
-                children: "Latest"
-              }, void 0, false), /*#__PURE__*/_jsxDEV("th", {
-                style: th,
-                children: "Trend"
-              }, void 0, false), /*#__PURE__*/_jsxDEV("th", {
-                style: th,
-                children: "Status"
-              }, void 0, false), /*#__PURE__*/_jsxDEV("th", {
-                style: th
-              }, void 0, false)]
-            }, void 0, true)
-          }, void 0, false), /*#__PURE__*/_jsxDEV("tbody", {
-            children: board.metrics.map(m => {
-              const sorted = sortHist(m.history);
-              const last = sorted[sorted.length - 1];
-              const isOpen = open === m.id;
-              const col = m.rag === "R" ? t.red : m.rag === "A" ? t.amber : t.green;
-              return /*#__PURE__*/_jsxDEV(React.Fragment, {
-                children: [/*#__PURE__*/_jsxDEV("tr", {
-                  className: "tp-row",
-                  children: [/*#__PURE__*/_jsxDEV("td", {
-                    style: {
-                      ...td,
-                      minWidth: 240
-                    },
-                    children: [/*#__PURE__*/_jsxDEV("span", {
-                      onClick: () => setOpen(isOpen ? null : m.id),
-                      className: "tp-icon",
-                      style: {
-                        marginRight: 6,
-                        verticalAlign: "middle"
-                      },
-                      children: /*#__PURE__*/_jsxDEV(Icon, {
-                        name: isOpen ? "chevD" : "chevR",
-                        size: 15
-                      }, void 0, false)
-                    }, void 0, false), /*#__PURE__*/_jsxDEV("input", {
-                      className: "tp-in",
-                      value: m.name,
-                      onChange: e => up(m.id, {
-                        name: e.target.value
-                      }),
-                      style: {
-                        width: "82%",
-                        display: "inline-block"
-                      }
-                    }, void 0, false)]
-                  }, void 0, true), /*#__PURE__*/_jsxDEV("td", {
-                    style: td,
-                    children: /*#__PURE__*/_jsxDEV(Cell, {
-                      value: m.owner,
-                      onChange: v => up(m.id, {
-                        owner: v
-                      }),
-                      w: 80
-                    }, void 0, false)
-                  }, void 0, false), /*#__PURE__*/_jsxDEV("td", {
-                    style: td,
-                    children: /*#__PURE__*/_jsxDEV(Cell, {
-                      value: m.goal,
-                      onChange: v => up(m.id, {
-                        goal: v
-                      }),
-                      w: 80,
-                      right: true
-                    }, void 0, false)
-                  }, void 0, false), /*#__PURE__*/_jsxDEV("td", {
-                    style: {
-                      ...td,
-                      fontWeight: 700,
-                      color: t.ink,
-                      textAlign: "right",
-                      whiteSpace: "nowrap"
-                    },
-                    children: last ? fmtVal(last.value) : "—"
-                  }, void 0, false), /*#__PURE__*/_jsxDEV("td", {
-                    style: td,
-                    children: /*#__PURE__*/_jsxDEV(Spark, {
-                      history: sorted,
-                      color: col
-                    }, void 0, false)
-                  }, void 0, false), /*#__PURE__*/_jsxDEV("td", {
-                    style: td,
-                    children: /*#__PURE__*/_jsxDEV(RagChip, {
-                      value: m.rag,
-                      onChange: v => up(m.id, {
-                        rag: v
-                      })
-                    }, void 0, false)
-                  }, void 0, false), /*#__PURE__*/_jsxDEV("td", {
-                    style: {
-                      ...td,
-                      textAlign: "right"
-                    },
-                    children: /*#__PURE__*/_jsxDEV(DelBtn, {
-                      onClick: () => del(m.id)
-                    }, void 0, false)
-                  }, void 0, false)]
-                }, void 0, true), isOpen && /*#__PURE__*/_jsxDEV("tr", {
-                  children: /*#__PURE__*/_jsxDEV("td", {
-                    colSpan: 7,
-                    style: {
-                      padding: "4px 10px 18px"
-                    },
-                    children: /*#__PURE__*/_jsxDEV("div", {
-                      style: {
-                        background: t.bg,
-                        border: `1px solid ${t.border}`,
-                        borderRadius: 10,
-                        padding: 16
-                      },
-                      children: [/*#__PURE__*/_jsxDEV("div", {
-                        style: {
-                          marginBottom: 14
-                        },
-                        children: /*#__PURE__*/_jsxDEV(WeeklyEntry, {
-                          defaultWeek: board.meta.weekOf,
-                          onSave: (w, v) => saveWeek(m, w, v)
-                        }, void 0, false)
-                      }, void 0, false), /*#__PURE__*/_jsxDEV("div", {
-                        style: {
-                          display: "flex",
-                          gap: 20,
-                          flexWrap: "wrap"
-                        },
-                        children: [/*#__PURE__*/_jsxDEV("div", {
-                          style: {
-                            flex: "1 1 340px",
-                            minWidth: 300
-                          },
-                          children: [/*#__PURE__*/_jsxDEV("div", {
-                            style: {
-                              fontSize: 12,
-                              color: t.muted,
-                              fontWeight: 600,
-                              marginBottom: 6,
-                              textTransform: "uppercase",
-                              letterSpacing: 0.5
-                            },
-                            children: "Trend"
-                          }, void 0, false), /*#__PURE__*/_jsxDEV(Trend, {
-                            history: sorted,
-                            target: m.goal,
-                            color: col
-                          }, void 0, false)]
-                        }, void 0, true), /*#__PURE__*/_jsxDEV("div", {
-                          style: {
-                            flex: "0 0 280px",
-                            maxWidth: 320
-                          },
-                          children: [/*#__PURE__*/_jsxDEV("div", {
-                            style: {
-                              fontSize: 12,
-                              color: t.muted,
-                              fontWeight: 600,
-                              marginBottom: 6,
-                              textTransform: "uppercase",
-                              letterSpacing: 0.5
-                            },
-                            children: ["Weekly values (", sorted.length, ")"]
-                          }, void 0, true), /*#__PURE__*/_jsxDEV("div", {
-                            style: {
-                              maxHeight: 200,
-                              overflowY: "auto"
-                            },
-                            children: [sorted.map(h => /*#__PURE__*/_jsxDEV("div", {
-                              style: {
-                                display: "flex",
-                                gap: 8,
-                                alignItems: "center",
-                                marginBottom: 5
-                              },
-                              children: [/*#__PURE__*/_jsxDEV("span", {
-                                style: {
-                                  width: 150,
-                                  fontSize: 12.5,
-                                  color: t.body
-                                },
-                                children: h.week
-                              }, void 0, false), /*#__PURE__*/_jsxDEV("input", {
-                                className: "tp-in",
-                                value: h.value,
-                                onChange: e => editWeek(m, h.week, e.target.value),
-                                style: {
-                                  width: 90,
-                                  fontSize: 12.5,
-                                  padding: "5px 7px",
-                                  textAlign: "right"
-                                }
-                              }, void 0, false), /*#__PURE__*/_jsxDEV(DelBtn, {
-                                onClick: () => delWeek(m, h.week)
-                              }, void 0, false)]
-                            }, h.week, true)), sorted.length === 0 && /*#__PURE__*/_jsxDEV("div", {
-                              style: {
-                                color: t.muted,
-                                fontSize: 13
-                              },
-                              children: "No values yet — record one above."
-                            }, void 0, false)]
-                          }, void 0, true)]
-                        }, void 0, true)]
-                      }, void 0, true)]
-                    }, void 0, true)
-                  }, void 0, false)
-                }, void 0, false)]
-              }, m.id, true);
-            })
-          }, void 0, false)]
-        }, void 0, true)
-      }, void 0, false), /*#__PURE__*/_jsxDEV("button", {
-        onClick: add,
-        style: btnAdd,
-        children: [/*#__PURE__*/_jsxDEV(Icon, {
-          name: "plus",
-          size: 15
-        }, void 0, false), " Add metric"]
-      }, void 0, true)]
-    }, void 0, true)]
-  }, void 0, true);
+  return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement(SectionTitle, {
+    sub: "Weekly numbers with trend history. Target is fixed here — expand a metric to change it. Cumulative is the running total to date."
+  }, "Scorecard"), /*#__PURE__*/React.createElement("div", {
+    style: card
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      overflowX: "auto"
+    }
+  }, /*#__PURE__*/React.createElement("table", {
+    style: {
+      width: "100%",
+      borderCollapse: "collapse",
+      minWidth: 720
+    }
+  }, /*#__PURE__*/React.createElement("thead", null, /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("th", {
+    style: th
+  }, "Metric"), /*#__PURE__*/React.createElement("th", {
+    style: th
+  }, "Owner"), /*#__PURE__*/React.createElement("th", {
+    style: th
+  }, "Target"), /*#__PURE__*/React.createElement("th", {
+    style: th
+  }, "Latest"), /*#__PURE__*/React.createElement("th", {
+    style: th
+  }, "Cumulative"), /*#__PURE__*/React.createElement("th", {
+    style: th
+  }, "Trend"), /*#__PURE__*/React.createElement("th", {
+    style: th
+  }, "Status"), /*#__PURE__*/React.createElement("th", {
+    style: th
+  }))), /*#__PURE__*/React.createElement("tbody", null, board.metrics.map(m => {
+    const sorted = sortHist(m.history);
+    const last = sorted[sorted.length - 1];
+    const cum = cumulativeOf(m);
+    const isOpen = open === m.id;
+    const col = m.rag === "R" ? t.red : m.rag === "A" ? t.amber : t.green;
+    return /*#__PURE__*/React.createElement(React.Fragment, {
+      key: m.id
+    }, /*#__PURE__*/React.createElement("tr", {
+      className: "tp-row"
+    }, /*#__PURE__*/React.createElement("td", {
+      style: {
+        ...td,
+        minWidth: 230
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      onClick: () => setOpen(isOpen ? null : m.id),
+      className: "tp-icon",
+      style: {
+        marginRight: 6,
+        verticalAlign: "middle"
+      }
+    }, /*#__PURE__*/React.createElement(Icon, {
+      name: isOpen ? "chevD" : "chevR",
+      size: 15
+    })), /*#__PURE__*/React.createElement("input", {
+      className: "tp-in",
+      value: m.name,
+      onChange: e => up(m.id, {
+        name: e.target.value
+      }),
+      style: {
+        width: "80%",
+        display: "inline-block"
+      }
+    })), /*#__PURE__*/React.createElement("td", {
+      style: td
+    }, /*#__PURE__*/React.createElement(OwnerSelect, {
+      value: m.owner,
+      onChange: v => up(m.id, {
+        owner: v
+      }),
+      w: 100
+    })), /*#__PURE__*/React.createElement("td", {
+      style: {
+        ...td,
+        fontWeight: 600,
+        color: t.ink,
+        whiteSpace: "nowrap"
+      }
+    }, m.goal || "—"), /*#__PURE__*/React.createElement("td", {
+      style: {
+        ...td,
+        fontWeight: 700,
+        color: t.ink,
+        textAlign: "right",
+        whiteSpace: "nowrap"
+      }
+    }, last ? fmtVal(last.value) : "—"), /*#__PURE__*/React.createElement("td", {
+      style: {
+        ...td,
+        textAlign: "right",
+        color: t.body,
+        whiteSpace: "nowrap"
+      }
+    }, cum == null ? "—" : fmtVal(cum)), /*#__PURE__*/React.createElement("td", {
+      style: td
+    }, /*#__PURE__*/React.createElement(Spark, {
+      history: sorted,
+      color: col
+    })), /*#__PURE__*/React.createElement("td", {
+      style: td
+    }, /*#__PURE__*/React.createElement(RagChip, {
+      value: m.rag,
+      onChange: v => up(m.id, {
+        rag: v
+      })
+    })), /*#__PURE__*/React.createElement("td", {
+      style: {
+        ...td,
+        textAlign: "right"
+      }
+    }, /*#__PURE__*/React.createElement(DelBtn, {
+      onClick: () => del(m.id)
+    }))), isOpen && /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("td", {
+      colSpan: 8,
+      style: {
+        padding: "4px 10px 18px"
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        background: t.bg,
+        border: `1px solid ${t.border}`,
+        borderRadius: 10,
+        padding: 16
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        gap: 12,
+        alignItems: "center",
+        marginBottom: 14,
+        flexWrap: "wrap"
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 12,
+        color: t.muted,
+        fontWeight: 600,
+        textTransform: "uppercase",
+        letterSpacing: 0.5
+      }
+    }, "Target (fixed — change here)"), /*#__PURE__*/React.createElement("input", {
+      className: "tp-in",
+      value: m.goal,
+      onChange: e => up(m.id, {
+        goal: e.target.value
+      }),
+      style: {
+        width: 130
+      }
+    })), /*#__PURE__*/React.createElement("div", {
+      style: {
+        marginBottom: 14
+      }
+    }, /*#__PURE__*/React.createElement(WeeklyEntry, {
+      defaultWeek: board.meta.weekOf,
+      onSave: (w, v) => saveWeek(m, w, v)
+    })), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        gap: 20,
+        flexWrap: "wrap"
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        flex: "1 1 340px",
+        minWidth: 300
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 12,
+        color: t.muted,
+        fontWeight: 600,
+        marginBottom: 6,
+        textTransform: "uppercase",
+        letterSpacing: 0.5
+      }
+    }, "Trend"), /*#__PURE__*/React.createElement(Trend, {
+      history: sorted,
+      target: m.goal,
+      color: col
+    })), /*#__PURE__*/React.createElement("div", {
+      style: {
+        flex: "0 0 280px",
+        maxWidth: 320
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 12,
+        color: t.muted,
+        fontWeight: 600,
+        marginBottom: 6,
+        textTransform: "uppercase",
+        letterSpacing: 0.5
+      }
+    }, "Weekly values (", sorted.length, ")"), /*#__PURE__*/React.createElement("div", {
+      style: {
+        maxHeight: 200,
+        overflowY: "auto"
+      }
+    }, sorted.map(h => /*#__PURE__*/React.createElement("div", {
+      key: h.week,
+      style: {
+        display: "flex",
+        gap: 8,
+        alignItems: "center",
+        marginBottom: 5
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        width: 150,
+        fontSize: 12.5,
+        color: t.body
+      }
+    }, h.week), /*#__PURE__*/React.createElement("input", {
+      className: "tp-in",
+      value: h.value,
+      onChange: e => editWeek(m, h.week, e.target.value),
+      style: {
+        width: 90,
+        fontSize: 12.5,
+        padding: "5px 7px",
+        textAlign: "right"
+      }
+    }), /*#__PURE__*/React.createElement(DelBtn, {
+      onClick: () => delWeek(m, h.week)
+    }))), sorted.length === 0 && /*#__PURE__*/React.createElement("div", {
+      style: {
+        color: t.muted,
+        fontSize: 13
+      }
+    }, "No values yet — record one above."))))))));
+  })))), /*#__PURE__*/React.createElement("button", {
+    onClick: add,
+    style: btnAdd
+  }, /*#__PURE__*/React.createElement(Icon, {
+    name: "plus",
+    size: 15
+  }), " Add metric")));
 }
 
-/* ------------------------------ Rocks ------------------------------ */
+/* Rocks: Objective/Owner/Due locked behind Edit; Owner drop-down */
 function Rocks({
   board,
   setBoard
 }) {
+  const [editId, setEditId] = useState(null);
   const up = (id, patch) => setBoard(b => ({
     ...b,
     rocks: b.rocks.map(r => r.id === id ? {
@@ -2752,18 +2451,27 @@ function Rocks({
       ...patch
     } : r)
   }));
-  const add = () => setBoard(b => ({
-    ...b,
-    rocks: [...b.rocks, {
-      id: uid(),
-      title: "",
-      owner: "",
-      due: "",
-      pct: "0",
-      rag: "A",
-      note: ""
-    }]
-  }));
+  const setNote = (id, val) => up(id, {
+    note: val,
+    noteAt: nowISO()
+  });
+  const add = () => {
+    const id = uid();
+    setBoard(b => ({
+      ...b,
+      rocks: [...b.rocks, {
+        id,
+        title: "",
+        owner: "",
+        due: "",
+        pct: "0",
+        rag: "A",
+        note: "",
+        noteAt: null
+      }]
+    }));
+    setEditId(id);
+  };
   const del = id => {
     if (!confirmDel("Delete this rock?")) return;
     setBoard(b => ({
@@ -2788,152 +2496,176 @@ function Rocks({
       }
     };
   });
-  return /*#__PURE__*/_jsxDEV("div", {
-    children: [/*#__PURE__*/_jsxDEV(SectionTitle, {
-      sub: "90-day objectives. Archive a rock once it's delivered.",
-      children: "Rocks"
-    }, void 0, false), board.rocks.map(r => /*#__PURE__*/_jsxDEV("div", {
+  return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement(SectionTitle, {
+    sub: "90-day objectives. Objective, owner and due date are fixed — click the pencil to change them. Progress, status and notes update freely."
+  }, "Rocks"), board.rocks.map(r => {
+    const ed = editId === r.id;
+    return /*#__PURE__*/React.createElement("div", {
+      key: r.id,
       style: {
         ...card,
         marginBottom: 12
-      },
-      children: [/*#__PURE__*/_jsxDEV("div", {
-        style: {
-          display: "flex",
-          gap: 12,
-          alignItems: "flex-start",
-          flexWrap: "wrap"
-        },
-        children: [/*#__PURE__*/_jsxDEV("div", {
-          style: {
-            flex: 2,
-            minWidth: 240
-          },
-          children: [/*#__PURE__*/_jsxDEV("label", {
-            style: lbl,
-            children: "Objective"
-          }, void 0, false), /*#__PURE__*/_jsxDEV("textarea", {
-            className: "tp-in",
-            value: r.title,
-            onChange: e => up(r.id, {
-              title: e.target.value
-            }),
-            rows: 3,
-            style: {
-              resize: "vertical"
-            }
-          }, void 0, false)]
-        }, void 0, true), /*#__PURE__*/_jsxDEV("div", {
-          style: {
-            flex: 1,
-            minWidth: 110
-          },
-          children: [/*#__PURE__*/_jsxDEV("label", {
-            style: lbl,
-            children: "Owner"
-          }, void 0, false), /*#__PURE__*/_jsxDEV(Cell, {
-            value: r.owner,
-            onChange: v => up(r.id, {
-              owner: v
-            })
-          }, void 0, false)]
-        }, void 0, true), /*#__PURE__*/_jsxDEV("div", {
-          style: {
-            minWidth: 150
-          },
-          children: [/*#__PURE__*/_jsxDEV("label", {
-            style: lbl,
-            children: "Due"
-          }, void 0, false), /*#__PURE__*/_jsxDEV(Cell, {
-            value: r.due,
-            onChange: v => up(r.id, {
-              due: v
-            }),
-            type: "date"
-          }, void 0, false)]
-        }, void 0, true)]
-      }, void 0, true), /*#__PURE__*/_jsxDEV("div", {
-        style: {
-          display: "flex",
-          gap: 16,
-          alignItems: "center",
-          marginTop: 14,
-          flexWrap: "wrap"
-        },
-        children: [/*#__PURE__*/_jsxDEV("div", {
-          style: {
-            flex: 1,
-            minWidth: 180
-          },
-          children: [/*#__PURE__*/_jsxDEV("div", {
-            style: {
-              display: "flex",
-              justifyContent: "space-between",
-              fontSize: 12,
-              color: t.muted,
-              marginBottom: 5
-            },
-            children: [/*#__PURE__*/_jsxDEV("span", {
-              children: "Progress"
-            }, void 0, false), /*#__PURE__*/_jsxDEV("span", {
-              style: {
-                fontWeight: 700,
-                color: t.ink
-              },
-              children: [r.pct || 0, "%"]
-            }, void 0, true)]
-          }, void 0, true), /*#__PURE__*/_jsxDEV("input", {
-            type: "range",
-            min: "0",
-            max: "100",
-            value: r.pct || 0,
-            onChange: e => up(r.id, {
-              pct: e.target.value
-            }),
-            style: {
-              width: "100%",
-              accentColor: RAG[r.rag].c
-            }
-          }, void 0, false)]
-        }, void 0, true), /*#__PURE__*/_jsxDEV(RagChip, {
-          value: r.rag,
-          onChange: v => up(r.id, {
-            rag: v
-          })
-        }, void 0, false), /*#__PURE__*/_jsxDEV(ArchiveBtn, {
-          onClick: () => archive(r.id)
-        }, void 0, false), /*#__PURE__*/_jsxDEV(DelBtn, {
-          onClick: () => del(r.id)
-        }, void 0, false)]
-      }, void 0, true), /*#__PURE__*/_jsxDEV("input", {
-        className: "tp-in",
-        value: r.note || "",
-        onChange: e => up(r.id, {
-          note: e.target.value
-        }),
-        placeholder: "Progress note…",
-        style: {
-          marginTop: 12,
-          fontSize: 13,
-          color: t.body
-        }
-      }, void 0, false)]
-    }, r.id, true)), /*#__PURE__*/_jsxDEV("button", {
-      onClick: add,
-      style: btnAdd,
-      children: [/*#__PURE__*/_jsxDEV(Icon, {
-        name: "plus",
-        size: 15
-      }, void 0, false), " Add rock"]
-    }, void 0, true)]
-  }, void 0, true);
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        gap: 12,
+        alignItems: "flex-start",
+        justifyContent: "space-between"
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        flex: 1
+      }
+    }, ed ? /*#__PURE__*/React.createElement("textarea", {
+      className: "tp-in",
+      value: r.title,
+      onChange: e => up(r.id, {
+        title: e.target.value
+      }),
+      rows: 3,
+      placeholder: "Objective",
+      style: {
+        resize: "vertical"
+      }
+    }) : /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 15,
+        fontWeight: 600,
+        color: t.ink,
+        lineHeight: 1.4
+      }
+    }, r.title || "—"), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        gap: 16,
+        alignItems: "center",
+        marginTop: 8,
+        flexWrap: "wrap"
+      }
+    }, ed ? /*#__PURE__*/React.createElement("span", {
+      style: {
+        display: "flex",
+        alignItems: "center",
+        gap: 6
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 12,
+        color: t.muted
+      }
+    }, "Owner"), /*#__PURE__*/React.createElement(OwnerSelect, {
+      value: r.owner,
+      onChange: v => up(r.id, {
+        owner: v
+      })
+    })) : /*#__PURE__*/React.createElement(Locked, {
+      label: "Owner",
+      value: r.owner
+    }), ed ? /*#__PURE__*/React.createElement("span", {
+      style: {
+        display: "flex",
+        alignItems: "center",
+        gap: 6
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 12,
+        color: t.muted
+      }
+    }, "Due"), /*#__PURE__*/React.createElement("input", {
+      className: "tp-in",
+      type: "date",
+      value: r.due,
+      onChange: e => up(r.id, {
+        due: e.target.value
+      }),
+      style: {
+        width: 150
+      }
+    })) : /*#__PURE__*/React.createElement(Locked, {
+      label: "Due",
+      value: r.due
+    }))), /*#__PURE__*/React.createElement(EditToggle, {
+      on: ed,
+      onClick: () => setEditId(ed ? null : r.id)
+    })), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        gap: 16,
+        alignItems: "center",
+        marginTop: 14,
+        flexWrap: "wrap"
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        flex: 1,
+        minWidth: 180
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        justifyContent: "space-between",
+        fontSize: 12,
+        color: t.muted,
+        marginBottom: 5
+      }
+    }, /*#__PURE__*/React.createElement("span", null, "Progress"), /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontWeight: 700,
+        color: t.ink
+      }
+    }, r.pct || 0, "%")), /*#__PURE__*/React.createElement("input", {
+      type: "range",
+      min: "0",
+      max: "100",
+      value: r.pct || 0,
+      onChange: e => up(r.id, {
+        pct: e.target.value
+      }),
+      style: {
+        width: "100%",
+        accentColor: RAG[r.rag].c
+      }
+    })), /*#__PURE__*/React.createElement(RagChip, {
+      value: r.rag,
+      onChange: v => up(r.id, {
+        rag: v
+      })
+    }), /*#__PURE__*/React.createElement(ArchiveBtn, {
+      onClick: () => archive(r.id)
+    }), /*#__PURE__*/React.createElement(DelBtn, {
+      onClick: () => del(r.id)
+    })), /*#__PURE__*/React.createElement("textarea", {
+      className: "tp-in",
+      value: r.note || "",
+      onChange: e => setNote(r.id, e.target.value),
+      placeholder: "Progress note…",
+      rows: 2,
+      style: {
+        marginTop: 12,
+        fontSize: 13,
+        color: t.body,
+        resize: "vertical"
+      }
+    }), /*#__PURE__*/React.createElement(Stamp, {
+      at: r.noteAt
+    }));
+  }), /*#__PURE__*/React.createElement("button", {
+    onClick: add,
+    style: btnAdd
+  }, /*#__PURE__*/React.createElement(Icon, {
+    name: "plus",
+    size: 15
+  }), " Add rock"));
 }
 
-/* ---------------------------- Headlines ---------------------------- */
+/* Headlines: Title/Owner/Status/Date locked behind Edit; commentary time-stamped */
 function Headlines({
   board,
   setBoard
 }) {
+  const [editId, setEditId] = useState(null);
   const up = (id, patch) => setBoard(b => ({
     ...b,
     headlines: b.headlines.map(h => h.id === id ? {
@@ -2941,17 +2673,26 @@ function Headlines({
       ...patch
     } : h)
   }));
-  const add = () => setBoard(b => ({
-    ...b,
-    headlines: [...b.headlines, {
-      id: uid(),
-      title: "",
-      commentary: "",
-      owner: "",
-      status: "",
-      date: ""
-    }]
-  }));
+  const setComment = (id, val) => up(id, {
+    commentary: val,
+    commentaryAt: nowISO()
+  });
+  const add = () => {
+    const id = uid();
+    setBoard(b => ({
+      ...b,
+      headlines: [...b.headlines, {
+        id,
+        title: "",
+        commentary: "",
+        commentaryAt: null,
+        owner: "",
+        status: "",
+        date: ""
+      }]
+    }));
+    setEditId(id);
+  };
   const del = id => {
     if (!confirmDel("Delete this headline?")) return;
     setBoard(b => ({
@@ -2990,7 +2731,8 @@ function Headlines({
         date: it.date || today(),
         priority: String(b.issues.length + 1),
         rag: "A",
-        note: it.commentary || ""
+        note: it.commentary || "",
+        noteAt: nowISO()
       }]
     };
   });
@@ -3008,117 +2750,181 @@ function Headlines({
         raised: today(),
         due: "",
         note: it.commentary || "",
+        noteAt: nowISO(),
         done: false
       }]
     };
   });
-  return /*#__PURE__*/_jsxDEV("div", {
-    children: [/*#__PURE__*/_jsxDEV(SectionTitle, {
-      sub: "Good news and things to know. A short title, with commentary underneath. Archive once actioned.",
-      children: "Headlines"
-    }, void 0, false), /*#__PURE__*/_jsxDEV("div", {
-      style: card,
-      children: [board.headlines.map(h => /*#__PURE__*/_jsxDEV("div", {
-        style: {
-          border: `1px solid ${t.borderSoft}`,
-          borderRadius: 9,
-          padding: 12,
-          marginBottom: 10
-        },
-        children: [/*#__PURE__*/_jsxDEV("input", {
-          className: "tp-in",
-          value: h.title,
-          onChange: e => up(h.id, {
-            title: e.target.value
-          }),
-          placeholder: "Title (e.g. Extra Value)",
-          style: {
-            fontSize: 14.5,
-            color: t.ink,
-            fontWeight: 600
-          }
-        }, void 0, false), /*#__PURE__*/_jsxDEV("textarea", {
-          className: "tp-in",
-          value: h.commentary || "",
-          onChange: e => up(h.id, {
-            commentary: e.target.value
-          }),
-          rows: 2,
-          placeholder: "Commentary…",
-          style: {
-            resize: "vertical",
-            marginTop: 8,
-            fontSize: 13.5,
-            color: t.body
-          }
-        }, void 0, false), /*#__PURE__*/_jsxDEV("div", {
-          style: {
-            display: "flex",
-            gap: 8,
-            alignItems: "center",
-            marginTop: 8,
-            flexWrap: "wrap"
-          },
-          children: [/*#__PURE__*/_jsxDEV(Cell, {
-            value: h.owner,
-            onChange: v => up(h.id, {
-              owner: v
-            }),
-            w: 120,
-            placeholder: "Owner"
-          }, void 0, false), /*#__PURE__*/_jsxDEV(Cell, {
-            value: h.status,
-            onChange: v => up(h.id, {
-              status: v
-            }),
-            w: 120,
-            placeholder: "Status"
-          }, void 0, false), /*#__PURE__*/_jsxDEV(Cell, {
-            value: h.date,
-            onChange: v => up(h.id, {
-              date: v
-            }),
-            type: "date",
-            w: 150
-          }, void 0, false), /*#__PURE__*/_jsxDEV("span", {
-            style: {
-              marginLeft: "auto",
-              display: "flex",
-              gap: 12,
-              alignItems: "center"
-            },
-            children: [/*#__PURE__*/_jsxDEV(MoveBtn, {
-              icon: "alert",
-              title: "Move to Issues",
-              onClick: () => toIssue(h.id)
-            }, void 0, false), /*#__PURE__*/_jsxDEV(MoveBtn, {
-              icon: "check",
-              title: "Move to To-dos",
-              onClick: () => toTodo(h.id)
-            }, void 0, false), /*#__PURE__*/_jsxDEV(ArchiveBtn, {
-              onClick: () => archive(h.id)
-            }, void 0, false), /*#__PURE__*/_jsxDEV(DelBtn, {
-              onClick: () => del(h.id)
-            }, void 0, false)]
-          }, void 0, true)]
-        }, void 0, true)]
-      }, h.id, true)), /*#__PURE__*/_jsxDEV("button", {
-        onClick: add,
-        style: btnAdd,
-        children: [/*#__PURE__*/_jsxDEV(Icon, {
-          name: "plus",
-          size: 15
-        }, void 0, false), " Add headline"]
-      }, void 0, true)]
-    }, void 0, true)]
-  }, void 0, true);
+  return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement(SectionTitle, {
+    sub: "Good news and things to know. Title, owner, status and date are fixed — click the pencil to change them. Commentary is free and time-stamped."
+  }, "Headlines"), /*#__PURE__*/React.createElement("div", {
+    style: card
+  }, board.headlines.map(h => {
+    const ed = editId === h.id;
+    return /*#__PURE__*/React.createElement("div", {
+      key: h.id,
+      style: {
+        border: `1px solid ${t.borderSoft}`,
+        borderRadius: 9,
+        padding: 12,
+        marginBottom: 10
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        gap: 10,
+        alignItems: "flex-start",
+        justifyContent: "space-between"
+      }
+    }, ed ? /*#__PURE__*/React.createElement("input", {
+      className: "tp-in",
+      value: h.title,
+      onChange: e => up(h.id, {
+        title: e.target.value
+      }),
+      placeholder: "Title (e.g. Extra Value)",
+      style: {
+        fontSize: 14.5,
+        color: t.ink,
+        fontWeight: 600
+      }
+    }) : /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 14.5,
+        fontWeight: 600,
+        color: t.ink,
+        flex: 1
+      }
+    }, h.title || "—"), /*#__PURE__*/React.createElement(EditToggle, {
+      on: ed,
+      onClick: () => setEditId(ed ? null : h.id)
+    })), /*#__PURE__*/React.createElement("textarea", {
+      className: "tp-in",
+      value: h.commentary || "",
+      onChange: e => setComment(h.id, e.target.value),
+      rows: 2,
+      placeholder: "Commentary…",
+      style: {
+        resize: "vertical",
+        marginTop: 8,
+        fontSize: 13.5,
+        color: t.body
+      }
+    }), /*#__PURE__*/React.createElement(Stamp, {
+      at: h.commentaryAt,
+      verb: "commented"
+    }), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        gap: 14,
+        alignItems: "center",
+        marginTop: 8,
+        flexWrap: "wrap"
+      }
+    }, ed ? /*#__PURE__*/React.createElement("span", {
+      style: {
+        display: "flex",
+        alignItems: "center",
+        gap: 6
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 12,
+        color: t.muted
+      }
+    }, "Owner"), /*#__PURE__*/React.createElement(OwnerSelect, {
+      value: h.owner,
+      onChange: v => up(h.id, {
+        owner: v
+      })
+    })) : /*#__PURE__*/React.createElement(Locked, {
+      label: "Owner",
+      value: h.owner
+    }), ed ? /*#__PURE__*/React.createElement("span", {
+      style: {
+        display: "flex",
+        alignItems: "center",
+        gap: 6
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 12,
+        color: t.muted
+      }
+    }, "Status"), /*#__PURE__*/React.createElement("select", {
+      className: "tp-in",
+      value: h.status || "",
+      onChange: e => up(h.id, {
+        status: e.target.value
+      }),
+      style: {
+        width: 130
+      }
+    }, HL_STATUS.map(s => /*#__PURE__*/React.createElement("option", {
+      key: s,
+      value: s
+    }, s || "—")))) : /*#__PURE__*/React.createElement(Locked, {
+      label: "Status",
+      value: h.status
+    }), ed ? /*#__PURE__*/React.createElement("span", {
+      style: {
+        display: "flex",
+        alignItems: "center",
+        gap: 6
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 12,
+        color: t.muted
+      }
+    }, "Date"), /*#__PURE__*/React.createElement("input", {
+      className: "tp-in",
+      type: "date",
+      value: h.date,
+      onChange: e => up(h.id, {
+        date: e.target.value
+      }),
+      style: {
+        width: 150
+      }
+    })) : /*#__PURE__*/React.createElement(Locked, {
+      label: "Date",
+      value: h.date
+    }), /*#__PURE__*/React.createElement("span", {
+      style: {
+        marginLeft: "auto",
+        display: "flex",
+        gap: 12,
+        alignItems: "center"
+      }
+    }, /*#__PURE__*/React.createElement(MoveBtn, {
+      icon: "alert",
+      title: "Move to Issues",
+      onClick: () => toIssue(h.id)
+    }), /*#__PURE__*/React.createElement(MoveBtn, {
+      icon: "check",
+      title: "Move to To-dos",
+      onClick: () => toTodo(h.id)
+    }), /*#__PURE__*/React.createElement(ArchiveBtn, {
+      onClick: () => archive(h.id)
+    }), /*#__PURE__*/React.createElement(DelBtn, {
+      onClick: () => del(h.id)
+    }))));
+  }), /*#__PURE__*/React.createElement("button", {
+    onClick: add,
+    style: btnAdd
+  }, /*#__PURE__*/React.createElement(Icon, {
+    name: "plus",
+    size: 15
+  }), " Add headline")));
 }
 
-/* ------------------------------ Issues ----------------------------- */
+/* Issues: Title/Owner/Date locked behind Edit; Status (RAG) + Date shown; commentary time-stamped */
 function Issues({
   board,
   setBoard
 }) {
+  const [editId, setEditId] = useState(null);
   const up = (id, patch) => setBoard(b => ({
     ...b,
     issues: b.issues.map(i => i.id === id ? {
@@ -3126,18 +2932,27 @@ function Issues({
       ...patch
     } : i)
   }));
-  const add = () => setBoard(b => ({
-    ...b,
-    issues: [...b.issues, {
-      id: uid(),
-      title: "",
-      owner: "",
-      date: "",
-      priority: String(b.issues.length + 1),
-      rag: "A",
-      note: ""
-    }]
-  }));
+  const setNote = (id, val) => up(id, {
+    note: val,
+    noteAt: nowISO()
+  });
+  const add = () => {
+    const id = uid();
+    setBoard(b => ({
+      ...b,
+      issues: [...b.issues, {
+        id,
+        title: "",
+        owner: "",
+        date: today(),
+        priority: String(b.issues.length + 1),
+        rag: "A",
+        note: "",
+        noteAt: null
+      }]
+    }));
+    setEditId(id);
+  };
   const del = id => {
     if (!confirmDel("Delete this issue?")) return;
     setBoard(b => ({
@@ -3176,105 +2991,162 @@ function Issues({
         raised: today(),
         due: "",
         note: it.note || "",
+        noteAt: nowISO(),
         done: false
       }]
     };
   });
   const sorted = [...board.issues].sort((a, b) => (+a.priority || 99) - (+b.priority || 99));
-  return /*#__PURE__*/_jsxDEV("div", {
-    children: [/*#__PURE__*/_jsxDEV(SectionTitle, {
-      sub: "Material issues to identify, discuss and solve. Title plus commentary. Archive once resolved.",
-      children: "Issues"
-    }, void 0, false), /*#__PURE__*/_jsxDEV("div", {
-      style: card,
-      children: [sorted.map(i => /*#__PURE__*/_jsxDEV("div", {
-        style: {
-          border: `1px solid ${t.borderSoft}`,
-          borderRadius: 9,
-          padding: 12,
-          marginBottom: 10
-        },
-        children: [/*#__PURE__*/_jsxDEV("div", {
-          style: {
-            display: "flex",
-            gap: 8,
-            alignItems: "center",
-            flexWrap: "wrap"
-          },
-          children: [/*#__PURE__*/_jsxDEV(Cell, {
-            value: i.priority,
-            onChange: v => up(i.id, {
-              priority: v
-            }),
-            w: 46,
-            right: true
-          }, void 0, false), /*#__PURE__*/_jsxDEV("input", {
-            className: "tp-in",
-            value: i.title,
-            onChange: e => up(i.id, {
-              title: e.target.value
-            }),
-            placeholder: "Title",
-            style: {
-              flex: 1,
-              minWidth: 200,
-              fontWeight: 600,
-              color: t.ink
-            }
-          }, void 0, false), /*#__PURE__*/_jsxDEV(Cell, {
-            value: i.owner,
-            onChange: v => up(i.id, {
-              owner: v
-            }),
-            w: 110,
-            placeholder: "Raised by"
-          }, void 0, false), /*#__PURE__*/_jsxDEV(RagChip, {
-            value: i.rag,
-            onChange: v => up(i.id, {
-              rag: v
-            })
-          }, void 0, false), /*#__PURE__*/_jsxDEV(MoveBtn, {
-            icon: "check",
-            title: "Move to To-dos",
-            onClick: () => toTodo(i.id)
-          }, void 0, false), /*#__PURE__*/_jsxDEV(ArchiveBtn, {
-            onClick: () => archive(i.id)
-          }, void 0, false), /*#__PURE__*/_jsxDEV(DelBtn, {
-            onClick: () => del(i.id)
-          }, void 0, false)]
-        }, void 0, true), /*#__PURE__*/_jsxDEV("textarea", {
-          className: "tp-in",
-          value: i.note || "",
-          onChange: e => up(i.id, {
-            note: e.target.value
-          }),
-          rows: 2,
-          placeholder: "Commentary…",
-          style: {
-            resize: "vertical",
-            marginTop: 8,
-            fontSize: 13.5,
-            color: t.body
-          }
-        }, void 0, false)]
-      }, i.id, true)), /*#__PURE__*/_jsxDEV("button", {
-        onClick: add,
-        style: btnAdd,
-        children: [/*#__PURE__*/_jsxDEV(Icon, {
-          name: "plus",
-          size: 15
-        }, void 0, false), " Add issue"]
-      }, void 0, true)]
-    }, void 0, true)]
-  }, void 0, true);
+  return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement(SectionTitle, {
+    sub: "Material issues to identify, discuss and solve. Title, owner and date are fixed — click the pencil to change. Status and commentary update freely."
+  }, "Issues"), /*#__PURE__*/React.createElement("div", {
+    style: card
+  }, sorted.map(i => {
+    const ed = editId === i.id;
+    return /*#__PURE__*/React.createElement("div", {
+      key: i.id,
+      style: {
+        border: `1px solid ${t.borderSoft}`,
+        borderRadius: 9,
+        padding: 12,
+        marginBottom: 10
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        gap: 8,
+        alignItems: "center",
+        flexWrap: "wrap"
+      }
+    }, /*#__PURE__*/React.createElement(Cell, {
+      value: i.priority,
+      onChange: v => up(i.id, {
+        priority: v
+      }),
+      w: 46,
+      right: true
+    }), ed ? /*#__PURE__*/React.createElement("input", {
+      className: "tp-in",
+      value: i.title,
+      onChange: e => up(i.id, {
+        title: e.target.value
+      }),
+      placeholder: "Title",
+      style: {
+        flex: 1,
+        minWidth: 200,
+        fontWeight: 600,
+        color: t.ink
+      }
+    }) : /*#__PURE__*/React.createElement("div", {
+      style: {
+        flex: 1,
+        minWidth: 200,
+        fontWeight: 600,
+        color: t.ink
+      }
+    }, i.title || "—"), /*#__PURE__*/React.createElement(RagChip, {
+      value: i.rag,
+      onChange: v => up(i.id, {
+        rag: v
+      })
+    }), /*#__PURE__*/React.createElement(EditToggle, {
+      on: ed,
+      onClick: () => setEditId(ed ? null : i.id)
+    }), /*#__PURE__*/React.createElement(MoveBtn, {
+      icon: "check",
+      title: "Move to To-dos",
+      onClick: () => toTodo(i.id)
+    }), /*#__PURE__*/React.createElement(ArchiveBtn, {
+      onClick: () => archive(i.id)
+    }), /*#__PURE__*/React.createElement(DelBtn, {
+      onClick: () => del(i.id)
+    })), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        gap: 14,
+        alignItems: "center",
+        marginTop: 8,
+        flexWrap: "wrap"
+      }
+    }, ed ? /*#__PURE__*/React.createElement("span", {
+      style: {
+        display: "flex",
+        alignItems: "center",
+        gap: 6
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 12,
+        color: t.muted
+      }
+    }, "Raised by"), /*#__PURE__*/React.createElement(OwnerSelect, {
+      value: i.owner,
+      onChange: v => up(i.id, {
+        owner: v
+      })
+    })) : /*#__PURE__*/React.createElement(Locked, {
+      label: "Raised by",
+      value: i.owner
+    }), ed ? /*#__PURE__*/React.createElement("span", {
+      style: {
+        display: "flex",
+        alignItems: "center",
+        gap: 6
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 12,
+        color: t.muted
+      }
+    }, "Date"), /*#__PURE__*/React.createElement("input", {
+      className: "tp-in",
+      type: "date",
+      value: i.date,
+      onChange: e => up(i.id, {
+        date: e.target.value
+      }),
+      style: {
+        width: 150
+      }
+    })) : /*#__PURE__*/React.createElement(Locked, {
+      label: "Date",
+      value: i.date
+    }), /*#__PURE__*/React.createElement(Locked, {
+      label: "Status",
+      value: RAG[i.rag].label
+    })), /*#__PURE__*/React.createElement("textarea", {
+      className: "tp-in",
+      value: i.note || "",
+      onChange: e => setNote(i.id, e.target.value),
+      rows: 2,
+      placeholder: "Commentary…",
+      style: {
+        resize: "vertical",
+        marginTop: 8,
+        fontSize: 13.5,
+        color: t.body
+      }
+    }), /*#__PURE__*/React.createElement(Stamp, {
+      at: i.noteAt,
+      verb: "commented"
+    }));
+  }), /*#__PURE__*/React.createElement("button", {
+    onClick: add,
+    style: btnAdd
+  }, /*#__PURE__*/React.createElement(Icon, {
+    name: "plus",
+    size: 15
+  }), " Add issue")));
 }
 
-/* ------------------------------ To-dos ----------------------------- */
+/* To-dos: Task/Owner/Dates locked behind Edit; Done free; commentary time-stamped */
 function Todos({
   board,
   setBoard
 }) {
   const [filter, setFilter] = useState("all");
+  const [editId, setEditId] = useState(null);
   const up = (id, patch) => setBoard(b => ({
     ...b,
     todos: b.todos.map(d => d.id === id ? {
@@ -3282,18 +3154,27 @@ function Todos({
       ...patch
     } : d)
   }));
-  const add = () => setBoard(b => ({
-    ...b,
-    todos: [...b.todos, {
-      id: uid(),
-      task: "",
-      owner: "",
-      raised: today(),
-      due: "",
-      note: "",
-      done: false
-    }]
-  }));
+  const setNote = (id, val) => up(id, {
+    note: val,
+    noteAt: nowISO()
+  });
+  const add = () => {
+    const id = uid();
+    setBoard(b => ({
+      ...b,
+      todos: [...b.todos, {
+        id,
+        task: "",
+        owner: "",
+        raised: today(),
+        due: "",
+        note: "",
+        noteAt: null,
+        done: false
+      }]
+    }));
+    setEditId(id);
+  };
   const del = id => {
     if (!confirmDel("Delete this to-do?")) return;
     setBoard(b => ({
@@ -3332,7 +3213,8 @@ function Todos({
         date: today(),
         priority: String(b.issues.length + 1),
         rag: "A",
-        note: it.note || ""
+        note: it.note || "",
+        noteAt: nowISO()
       }]
     };
   });
@@ -3355,165 +3237,229 @@ function Todos({
   const doneCount = board.todos.filter(d => d.done).length;
   const shown = board.todos.filter(d => filter === "all" ? true : filter === "open" ? !d.done : filter === "overdue" ? !d.done && isOverdue(d.due) : d.done);
   const filters = [["all", "All"], ["open", "Open"], ["overdue", "Overdue"], ["done", "Done"]];
-  return /*#__PURE__*/_jsxDEV("div", {
-    children: [/*#__PURE__*/_jsxDEV(SectionTitle, {
-      sub: "The action log. Tick items done, then archive them for future reference.",
-      children: "To-dos"
-    }, void 0, false), /*#__PURE__*/_jsxDEV("div", {
-      style: card,
-      children: [/*#__PURE__*/_jsxDEV("div", {
-        style: {
-          display: "flex",
-          gap: 6,
-          marginBottom: 12,
-          flexWrap: "wrap"
-        },
-        children: filters.map(([k, label]) => /*#__PURE__*/_jsxDEV("button", {
-          onClick: () => setFilter(k),
-          className: "tp-chipbtn",
-          style: {
-            border: `1px solid ${filter === k ? t.navy : t.border}`,
-            background: filter === k ? t.navy : "#fff",
-            color: filter === k ? "#fff" : t.body,
-            borderRadius: 20,
-            padding: "5px 12px",
-            cursor: "pointer",
-            font: "inherit",
-            fontSize: 12.5,
-            fontWeight: 600
-          },
-          children: label
-        }, k, false))
-      }, void 0, false), shown.map(d => /*#__PURE__*/_jsxDEV("div", {
-        style: {
-          borderBottom: `1px solid ${t.borderSoft}`,
-          padding: "10px 4px"
-        },
-        children: [/*#__PURE__*/_jsxDEV("div", {
-          style: {
-            display: "flex",
-            gap: 10,
-            alignItems: "center",
-            flexWrap: "wrap"
-          },
-          children: [/*#__PURE__*/_jsxDEV("input", {
-            type: "checkbox",
-            checked: d.done,
-            onChange: e => up(d.id, {
-              done: e.target.checked
-            }),
-            style: {
-              width: 17,
-              height: 17,
-              accentColor: t.green,
-              cursor: "pointer"
-            }
-          }, void 0, false), /*#__PURE__*/_jsxDEV("input", {
-            className: "tp-in",
-            value: d.task,
-            onChange: e => up(d.id, {
-              task: e.target.value
-            }),
-            placeholder: "Title",
-            style: {
-              flex: 1,
-              minWidth: 200,
-              border: "none",
-              fontWeight: 600,
-              textDecoration: d.done ? "line-through" : "none",
-              color: d.done ? t.muted : t.ink
-            }
-          }, void 0, false), /*#__PURE__*/_jsxDEV(Cell, {
-            value: d.owner,
-            onChange: v => up(d.id, {
-              owner: v
-            }),
-            w: 100,
-            placeholder: "Owner"
-          }, void 0, false), /*#__PURE__*/_jsxDEV("input", {
-            className: "tp-in",
-            type: "date",
-            value: d.due,
-            onChange: e => up(d.id, {
-              due: e.target.value
-            }),
-            style: {
-              width: 150,
-              borderColor: !d.done && isOverdue(d.due) ? t.red : t.border
-            }
-          }, void 0, false), !d.done && isOverdue(d.due) && /*#__PURE__*/_jsxDEV("span", {
-            style: {
-              fontSize: 11,
-              color: t.red,
-              fontWeight: 700
-            },
-            children: "LATE"
-          }, void 0, false), /*#__PURE__*/_jsxDEV(MoveBtn, {
-            icon: "alert",
-            title: "Move to Issues",
-            onClick: () => toIssue(d.id)
-          }, void 0, false), /*#__PURE__*/_jsxDEV(ArchiveBtn, {
-            onClick: () => archive(d.id)
-          }, void 0, false), /*#__PURE__*/_jsxDEV(DelBtn, {
-            onClick: () => del(d.id)
-          }, void 0, false)]
-        }, void 0, true), /*#__PURE__*/_jsxDEV("textarea", {
-          className: "tp-in",
-          value: d.note || "",
-          onChange: e => up(d.id, {
-            note: e.target.value
-          }),
-          rows: 2,
-          placeholder: "Commentary…",
-          style: {
-            resize: "vertical",
-            marginTop: 8,
-            marginLeft: 27,
-            width: "calc(100% - 27px)",
-            fontSize: 13,
-            color: t.body
-          }
-        }, void 0, false)]
-      }, d.id, true)), shown.length === 0 && /*#__PURE__*/_jsxDEV("div", {
-        style: {
-          color: t.muted,
-          fontSize: 14,
-          padding: "6px 4px"
-        },
-        children: "Nothing in this view."
-      }, void 0, false), /*#__PURE__*/_jsxDEV("div", {
-        style: {
-          display: "flex",
-          gap: 10,
-          flexWrap: "wrap",
-          alignItems: "center"
-        },
-        children: [/*#__PURE__*/_jsxDEV("button", {
-          onClick: add,
-          style: btnAdd,
-          children: [/*#__PURE__*/_jsxDEV(Icon, {
-            name: "plus",
-            size: 15
-          }, void 0, false), " Add to-do"]
-        }, void 0, true), doneCount > 0 && /*#__PURE__*/_jsxDEV("button", {
-          onClick: archiveDone,
-          style: {
-            ...btnAdd,
-            borderStyle: "solid",
-            color: t.green,
-            borderColor: t.green
-          },
-          children: [/*#__PURE__*/_jsxDEV(Icon, {
-            name: "archive",
-            size: 15
-          }, void 0, false), " Archive ", doneCount, " completed"]
-        }, void 0, true)]
-      }, void 0, true)]
-    }, void 0, true)]
-  }, void 0, true);
+  return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement(SectionTitle, {
+    sub: "The action log. Task, owner and dates are fixed — click the pencil to change. Tick Done freely; commentary is time-stamped."
+  }, "To-dos"), /*#__PURE__*/React.createElement("div", {
+    style: card
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 6,
+      marginBottom: 12,
+      flexWrap: "wrap"
+    }
+  }, filters.map(([k, label]) => /*#__PURE__*/React.createElement("button", {
+    key: k,
+    onClick: () => setFilter(k),
+    className: "tp-chipbtn",
+    style: {
+      border: `1px solid ${filter === k ? t.navy : t.border}`,
+      background: filter === k ? t.navy : "#fff",
+      color: filter === k ? "#fff" : t.body,
+      borderRadius: 20,
+      padding: "5px 12px",
+      cursor: "pointer",
+      font: "inherit",
+      fontSize: 12.5,
+      fontWeight: 600
+    }
+  }, label))), shown.map(d => {
+    const ed = editId === d.id;
+    return /*#__PURE__*/React.createElement("div", {
+      key: d.id,
+      style: {
+        borderBottom: `1px solid ${t.borderSoft}`,
+        padding: "10px 4px"
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        gap: 10,
+        alignItems: "center",
+        flexWrap: "wrap"
+      }
+    }, /*#__PURE__*/React.createElement("input", {
+      type: "checkbox",
+      checked: d.done,
+      onChange: e => up(d.id, {
+        done: e.target.checked
+      }),
+      style: {
+        width: 17,
+        height: 17,
+        accentColor: t.green,
+        cursor: "pointer"
+      }
+    }), ed ? /*#__PURE__*/React.createElement("input", {
+      className: "tp-in",
+      value: d.task,
+      onChange: e => up(d.id, {
+        task: e.target.value
+      }),
+      placeholder: "Title",
+      style: {
+        flex: 1,
+        minWidth: 200,
+        fontWeight: 600,
+        color: t.ink
+      }
+    }) : /*#__PURE__*/React.createElement("div", {
+      style: {
+        flex: 1,
+        minWidth: 200,
+        fontWeight: 600,
+        textDecoration: d.done ? "line-through" : "none",
+        color: d.done ? t.muted : t.ink
+      }
+    }, d.task || "—"), !d.done && isOverdue(d.due) && /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 11,
+        color: t.red,
+        fontWeight: 700
+      }
+    }, "LATE"), /*#__PURE__*/React.createElement(EditToggle, {
+      on: ed,
+      onClick: () => setEditId(ed ? null : d.id)
+    }), /*#__PURE__*/React.createElement(MoveBtn, {
+      icon: "alert",
+      title: "Move to Issues",
+      onClick: () => toIssue(d.id)
+    }), /*#__PURE__*/React.createElement(ArchiveBtn, {
+      onClick: () => archive(d.id)
+    }), /*#__PURE__*/React.createElement(DelBtn, {
+      onClick: () => del(d.id)
+    })), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        gap: 14,
+        alignItems: "center",
+        marginTop: 8,
+        marginLeft: 27,
+        flexWrap: "wrap"
+      }
+    }, ed ? /*#__PURE__*/React.createElement("span", {
+      style: {
+        display: "flex",
+        alignItems: "center",
+        gap: 6
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 12,
+        color: t.muted
+      }
+    }, "Owner"), /*#__PURE__*/React.createElement(OwnerSelect, {
+      value: d.owner,
+      onChange: v => up(d.id, {
+        owner: v
+      })
+    })) : /*#__PURE__*/React.createElement(Locked, {
+      label: "Owner",
+      value: d.owner
+    }), ed ? /*#__PURE__*/React.createElement("span", {
+      style: {
+        display: "flex",
+        alignItems: "center",
+        gap: 6
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 12,
+        color: t.muted
+      }
+    }, "Raised"), /*#__PURE__*/React.createElement("input", {
+      className: "tp-in",
+      type: "date",
+      value: d.raised,
+      onChange: e => up(d.id, {
+        raised: e.target.value
+      }),
+      style: {
+        width: 150
+      }
+    })) : /*#__PURE__*/React.createElement(Locked, {
+      label: "Raised",
+      value: d.raised
+    }), ed ? /*#__PURE__*/React.createElement("span", {
+      style: {
+        display: "flex",
+        alignItems: "center",
+        gap: 6
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 12,
+        color: t.muted
+      }
+    }, "Due"), /*#__PURE__*/React.createElement("input", {
+      className: "tp-in",
+      type: "date",
+      value: d.due,
+      onChange: e => up(d.id, {
+        due: e.target.value
+      }),
+      style: {
+        width: 150
+      }
+    })) : /*#__PURE__*/React.createElement(Locked, {
+      label: "Due",
+      value: d.due
+    })), /*#__PURE__*/React.createElement("textarea", {
+      className: "tp-in",
+      value: d.note || "",
+      onChange: e => setNote(d.id, e.target.value),
+      rows: 2,
+      placeholder: "Commentary…",
+      style: {
+        resize: "vertical",
+        marginTop: 8,
+        marginLeft: 27,
+        width: "calc(100% - 27px)",
+        fontSize: 13,
+        color: t.body
+      }
+    }), /*#__PURE__*/React.createElement("div", {
+      style: {
+        marginLeft: 27
+      }
+    }, /*#__PURE__*/React.createElement(Stamp, {
+      at: d.noteAt,
+      verb: "commented"
+    })));
+  }), shown.length === 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: t.muted,
+      fontSize: 14,
+      padding: "6px 4px"
+    }
+  }, "Nothing in this view."), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 10,
+      flexWrap: "wrap",
+      alignItems: "center"
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: add,
+    style: btnAdd
+  }, /*#__PURE__*/React.createElement(Icon, {
+    name: "plus",
+    size: 15
+  }), " Add to-do"), doneCount > 0 && /*#__PURE__*/React.createElement("button", {
+    onClick: archiveDone,
+    style: {
+      ...btnAdd,
+      borderStyle: "solid",
+      color: t.green,
+      borderColor: t.green
+    }
+  }, /*#__PURE__*/React.createElement(Icon, {
+    name: "archive",
+    size: 15
+  }), " Archive ", doneCount, " completed"))));
 }
 
-/* ------------------------------ Archive ---------------------------- */
+/* Archive */
 function ArchiveView({
   board,
   setBoard
@@ -3564,79 +3510,69 @@ function ArchiveView({
     get: x => x.task
   }];
   const empty = groups.every(g => board.archive[g.type].length === 0);
-  return /*#__PURE__*/_jsxDEV("div", {
-    children: [/*#__PURE__*/_jsxDEV(SectionTitle, {
-      sub: "Delivered and actioned items, kept for future reference. Restore any item to bring it back to the live board.",
-      children: "Archive"
-    }, void 0, false), empty && /*#__PURE__*/_jsxDEV("div", {
-      style: card,
-      children: /*#__PURE__*/_jsxDEV("div", {
-        style: {
-          color: t.muted,
-          fontSize: 14
-        },
-        children: "Nothing archived yet. Use the archive icon on a rock, headline, issue or to-do once it's delivered."
-      }, void 0, false)
-    }, void 0, false), groups.map(g => board.archive[g.type].length > 0 && /*#__PURE__*/_jsxDEV("div", {
-      style: {
-        ...card,
-        marginBottom: 14
-      },
-      children: [/*#__PURE__*/_jsxDEV("div", {
-        style: {
-          fontWeight: 700,
-          color: t.ink,
-          fontSize: 15,
-          marginBottom: 10
-        },
-        children: [g.label, " ", /*#__PURE__*/_jsxDEV("span", {
-          style: {
-            color: t.muted,
-            fontWeight: 500
-          },
-          children: ["· ", board.archive[g.type].length]
-        }, void 0, true)]
-      }, void 0, true), board.archive[g.type].map(x => /*#__PURE__*/_jsxDEV("div", {
-        className: "tp-row",
-        style: {
-          display: "flex",
-          gap: 10,
-          alignItems: "center",
-          padding: "9px 6px",
-          borderBottom: `1px solid ${t.borderSoft}`
-        },
-        children: [/*#__PURE__*/_jsxDEV("span", {
-          style: {
-            flex: 1,
-            color: t.body,
-            fontSize: 14
-          },
-          children: g.get(x)
-        }, void 0, false), /*#__PURE__*/_jsxDEV("span", {
-          style: {
-            fontSize: 12,
-            color: t.muted,
-            whiteSpace: "nowrap"
-          },
-          children: x.archivedOn
-        }, void 0, false), /*#__PURE__*/_jsxDEV("span", {
-          className: "tp-icon",
-          onClick: () => restore(g.type, x.id),
-          title: "Restore to live board",
-          children: /*#__PURE__*/_jsxDEV(Icon, {
-            name: "restore",
-            size: 16
-          }, void 0, false)
-        }, void 0, false), /*#__PURE__*/_jsxDEV(DelBtn, {
-          onClick: () => del(g.type, x.id),
-          title: "Delete permanently"
-        }, void 0, false)]
-      }, x.id, true))]
-    }, g.type, true))]
-  }, void 0, true);
+  return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement(SectionTitle, {
+    sub: "Delivered and actioned items, kept for reference. Restore any item to bring it back."
+  }, "Archive"), empty && /*#__PURE__*/React.createElement("div", {
+    style: card
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: t.muted,
+      fontSize: 14
+    }
+  }, "Nothing archived yet. Use the archive icon on a rock, headline, issue or to-do once it's delivered.")), groups.map(g => board.archive[g.type].length > 0 && /*#__PURE__*/React.createElement("div", {
+    key: g.type,
+    style: {
+      ...card,
+      marginBottom: 14
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontWeight: 700,
+      color: t.ink,
+      fontSize: 15,
+      marginBottom: 10
+    }
+  }, g.label, " ", /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: t.muted,
+      fontWeight: 500
+    }
+  }, "· ", board.archive[g.type].length)), board.archive[g.type].map(x => /*#__PURE__*/React.createElement("div", {
+    key: x.id,
+    className: "tp-row",
+    style: {
+      display: "flex",
+      gap: 10,
+      alignItems: "center",
+      padding: "9px 6px",
+      borderBottom: `1px solid ${t.borderSoft}`
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      flex: 1,
+      color: t.body,
+      fontSize: 14
+    }
+  }, g.get(x)), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 12,
+      color: t.muted,
+      whiteSpace: "nowrap"
+    }
+  }, x.archivedOn), /*#__PURE__*/React.createElement("span", {
+    className: "tp-icon",
+    onClick: () => restore(g.type, x.id),
+    title: "Restore"
+  }, /*#__PURE__*/React.createElement(Icon, {
+    name: "restore",
+    size: 16
+  })), /*#__PURE__*/React.createElement(DelBtn, {
+    onClick: () => del(g.type, x.id),
+    title: "Delete permanently"
+  }))))));
 }
 
-/* --------------------------- Transcript ---------------------------- */
+/* Transcript intake */
 function Intake({
   board,
   setBoard,
@@ -3652,9 +3588,9 @@ function Intake({
     setLoading(true);
     setError("");
     setProposal(null);
-    const prompt = "Read this transcript and pull out updates for a team board. Return ONLY compact JSON: {\"todos\":[{\"task\":\"\",\"owner\":\"\"}],\"issues\":[{\"title\":\"\",\"owner\":\"\"}],\"headlines\":[{\"text\":\"\",\"owner\":\"\"}],\"rockNotes\":[{\"match\":\"\",\"note\":\"\"}]}. Short strings, owners only if named. Rocks: " + board.rocks.map(r => r.title.slice(0, 60)).join(" | ") + "\n\nTRANSCRIPT:\n" + text.slice(0, 8000);
+    const prompt = 'Read this transcript, return ONLY compact JSON: {"todos":[{"task":"","owner":""}],"issues":[{"title":"","owner":""}],"headlines":[{"text":"","owner":""}],"rockNotes":[{"match":"","note":""}]}. Short strings, owners only if named. Rocks: ' + board.rocks.map(r => r.title.slice(0, 60)).join(" | ") + "\n\nTRANSCRIPT:\n" + text.slice(0, 8000);
     try {
-      const out = await callClaude(prompt, "You extract structured actions from meeting transcripts. Output valid minified JSON only.");
+      const out = await callClaude(prompt, "Extract structured actions. Valid minified JSON only.");
       const parsed = JSON.parse(out.replace(/```json/gi, "").replace(/```/g, "").trim());
       setProposal(parsed);
       const p = {};
@@ -3664,7 +3600,7 @@ function Intake({
       (parsed.rockNotes || []).forEach((_, i) => p["rock" + i] = true);
       setPicked(p);
     } catch (e) {
-      setError(e.message || "Couldn't process the transcript. Add an AI key in Overview → AI settings, or add items manually.");
+      setError(e.message || "Couldn't process. Add an AI key in Overview → AI settings.");
     } finally {
       setLoading(false);
     }
@@ -3689,6 +3625,7 @@ function Intake({
           raised: today(),
           due: "",
           note: "",
+          noteAt: null,
           done: false
         });
       });
@@ -3700,7 +3637,8 @@ function Intake({
           date: today(),
           priority: String(nb.issues.length + 1),
           rag: "A",
-          note: ""
+          note: "",
+          noteAt: null
         });
       });
       (p.headlines || []).forEach((it, i) => {
@@ -3708,6 +3646,7 @@ function Intake({
           id: uid(),
           title: it.text,
           commentary: "",
+          commentaryAt: null,
           owner: it.owner || "",
           status: "",
           date: today()
@@ -3724,7 +3663,8 @@ function Intake({
           date: today(),
           priority: String(nb.issues.length + 1),
           rag: "A",
-          note: ""
+          note: "",
+          noteAt: null
         });
       });
       return nb;
@@ -3740,134 +3680,121 @@ function Intake({
     [k]: !p[k]
   }));
   const has = proposal && ((proposal.todos || []).length || (proposal.issues || []).length || (proposal.headlines || []).length || (proposal.rockNotes || []).length);
-  return /*#__PURE__*/_jsxDEV("div", {
-    children: [/*#__PURE__*/_jsxDEV(SectionTitle, {
-      sub: "Paste a call or meeting transcript. It proposes updates; you choose what to apply. (Needs an AI key — set it in Overview → AI settings.)",
-      children: "Transcript intake"
-    }, void 0, false), /*#__PURE__*/_jsxDEV("div", {
-      style: card,
-      children: [/*#__PURE__*/_jsxDEV("textarea", {
-        className: "tp-in",
-        value: text,
-        onChange: e => setText(e.target.value),
-        rows: 9,
-        placeholder: "Paste your transcript here…",
-        style: {
-          resize: "vertical",
-          fontFamily: "'Consolas',monospace",
-          fontSize: 13
-        }
-      }, void 0, false), /*#__PURE__*/_jsxDEV("div", {
-        style: {
-          display: "flex",
-          gap: 10,
-          alignItems: "center",
-          marginTop: 12,
-          flexWrap: "wrap"
-        },
-        children: [/*#__PURE__*/_jsxDEV("button", {
-          onClick: extract,
-          disabled: loading || !text.trim(),
-          className: "tp-primary",
-          style: {
-            ...btnPrimary,
-            display: "flex",
-            alignItems: "center",
-            gap: 7,
-            opacity: loading || !text.trim() ? 0.6 : 1
-          },
-          children: [loading ? /*#__PURE__*/_jsxDEV(Icon, {
-            name: "loader",
-            size: 14
-          }, void 0, false) : /*#__PURE__*/_jsxDEV(Icon, {
-            name: "sparkles",
-            size: 14
-          }, void 0, false), loading ? "Reading…" : "Extract updates"]
-        }, void 0, true), /*#__PURE__*/_jsxDEV("span", {
-          style: {
-            fontSize: 12.5,
-            color: t.muted
-          },
-          children: "Nothing changes until you apply."
-        }, void 0, false)]
-      }, void 0, true)]
-    }, void 0, true), error && /*#__PURE__*/_jsxDEV("div", {
-      style: {
-        ...card,
-        marginTop: 14
-      },
-      children: /*#__PURE__*/_jsxDEV("div", {
-        style: notice(t.amber, RAG.A.soft),
-        children: error
-      }, void 0, false)
-    }, void 0, false), proposal && /*#__PURE__*/_jsxDEV("div", {
-      style: {
-        ...card,
-        marginTop: 14
-      },
-      children: [/*#__PURE__*/_jsxDEV("div", {
-        style: {
-          fontWeight: 700,
-          color: t.ink,
-          fontSize: 15,
-          marginBottom: 12
-        },
-        children: "Proposed updates — tick what to apply"
-      }, void 0, false), !has && /*#__PURE__*/_jsxDEV("div", {
-        style: {
-          color: t.muted,
-          fontSize: 14
-        },
-        children: "Nothing actionable found."
-      }, void 0, false), /*#__PURE__*/_jsxDEV(ProposalGroup, {
-        title: "To-dos",
-        items: (proposal.todos || []).map((it, i) => ({
-          key: "todo" + i,
-          label: it.task + (it.owner ? ` — ${it.owner}` : "")
-        })),
-        picked: picked,
-        toggle: toggle
-      }, void 0, false), /*#__PURE__*/_jsxDEV(ProposalGroup, {
-        title: "Issues",
-        items: (proposal.issues || []).map((it, i) => ({
-          key: "issue" + i,
-          label: it.title + (it.owner ? ` — ${it.owner}` : "")
-        })),
-        picked: picked,
-        toggle: toggle
-      }, void 0, false), /*#__PURE__*/_jsxDEV(ProposalGroup, {
-        title: "Headlines",
-        items: (proposal.headlines || []).map((it, i) => ({
-          key: "hl" + i,
-          label: it.text + (it.owner ? ` — ${it.owner}` : "")
-        })),
-        picked: picked,
-        toggle: toggle
-      }, void 0, false), /*#__PURE__*/_jsxDEV(ProposalGroup, {
-        title: "Rock notes",
-        items: (proposal.rockNotes || []).map((it, i) => ({
-          key: "rock" + i,
-          label: `${it.match ? it.match + ": " : ""}${it.note}`
-        })),
-        picked: picked,
-        toggle: toggle
-      }, void 0, false), has ? /*#__PURE__*/_jsxDEV("button", {
-        onClick: apply,
-        className: "tp-primary",
-        style: {
-          ...btnPrimary,
-          marginTop: 14,
-          display: "flex",
-          alignItems: "center",
-          gap: 7
-        },
-        children: ["Apply selected to board ", /*#__PURE__*/_jsxDEV(Icon, {
-          name: "chevR",
-          size: 15
-        }, void 0, false)]
-      }, void 0, true) : null]
-    }, void 0, true)]
-  }, void 0, true);
+  return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement(SectionTitle, {
+    sub: "Paste a transcript. It proposes updates; you choose what to apply. (Needs an AI key — Overview → AI settings.)"
+  }, "Transcript intake"), /*#__PURE__*/React.createElement("div", {
+    style: card
+  }, /*#__PURE__*/React.createElement("textarea", {
+    className: "tp-in",
+    value: text,
+    onChange: e => setText(e.target.value),
+    rows: 9,
+    placeholder: "Paste your transcript here…",
+    style: {
+      resize: "vertical",
+      fontFamily: "'Consolas',monospace",
+      fontSize: 13
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 10,
+      alignItems: "center",
+      marginTop: 12,
+      flexWrap: "wrap"
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: extract,
+    disabled: loading || !text.trim(),
+    className: "tp-primary",
+    style: {
+      ...btnPrimary,
+      display: "flex",
+      alignItems: "center",
+      gap: 7,
+      opacity: loading || !text.trim() ? 0.6 : 1
+    }
+  }, loading ? /*#__PURE__*/React.createElement(Icon, {
+    name: "loader",
+    size: 14
+  }) : /*#__PURE__*/React.createElement(Icon, {
+    name: "sparkles",
+    size: 14
+  }), loading ? "Reading…" : "Extract updates"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 12.5,
+      color: t.muted
+    }
+  }, "Nothing changes until you apply."))), error && /*#__PURE__*/React.createElement("div", {
+    style: {
+      ...card,
+      marginTop: 14
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: notice(t.amber, RAG.A.soft)
+  }, error)), proposal && /*#__PURE__*/React.createElement("div", {
+    style: {
+      ...card,
+      marginTop: 14
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontWeight: 700,
+      color: t.ink,
+      fontSize: 15,
+      marginBottom: 12
+    }
+  }, "Proposed updates — tick what to apply"), !has && /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: t.muted,
+      fontSize: 14
+    }
+  }, "Nothing actionable found."), /*#__PURE__*/React.createElement(ProposalGroup, {
+    title: "To-dos",
+    items: (proposal.todos || []).map((it, i) => ({
+      key: "todo" + i,
+      label: it.task + (it.owner ? ` — ${it.owner}` : "")
+    })),
+    picked: picked,
+    toggle: toggle
+  }), /*#__PURE__*/React.createElement(ProposalGroup, {
+    title: "Issues",
+    items: (proposal.issues || []).map((it, i) => ({
+      key: "issue" + i,
+      label: it.title + (it.owner ? ` — ${it.owner}` : "")
+    })),
+    picked: picked,
+    toggle: toggle
+  }), /*#__PURE__*/React.createElement(ProposalGroup, {
+    title: "Headlines",
+    items: (proposal.headlines || []).map((it, i) => ({
+      key: "hl" + i,
+      label: it.text + (it.owner ? ` — ${it.owner}` : "")
+    })),
+    picked: picked,
+    toggle: toggle
+  }), /*#__PURE__*/React.createElement(ProposalGroup, {
+    title: "Rock notes",
+    items: (proposal.rockNotes || []).map((it, i) => ({
+      key: "rock" + i,
+      label: `${it.match ? it.match + ": " : ""}${it.note}`
+    })),
+    picked: picked,
+    toggle: toggle
+  }), has ? /*#__PURE__*/React.createElement("button", {
+    onClick: apply,
+    className: "tp-primary",
+    style: {
+      ...btnPrimary,
+      marginTop: 14,
+      display: "flex",
+      alignItems: "center",
+      gap: 7
+    }
+  }, "Apply selected ", /*#__PURE__*/React.createElement(Icon, {
+    name: "chevR",
+    size: 15
+  })) : null));
 }
 function ProposalGroup({
   title,
@@ -3876,64 +3803,58 @@ function ProposalGroup({
   toggle
 }) {
   if (!items.length) return null;
-  return /*#__PURE__*/_jsxDEV("div", {
+  return /*#__PURE__*/React.createElement("div", {
     style: {
       marginBottom: 14
-    },
-    children: [/*#__PURE__*/_jsxDEV("div", {
-      style: {
-        fontSize: 11,
-        textTransform: "uppercase",
-        letterSpacing: 0.6,
-        color: t.muted,
-        fontWeight: 600,
-        marginBottom: 6
-      },
-      children: title
-    }, void 0, false), items.map(it => /*#__PURE__*/_jsxDEV("label", {
-      style: {
-        display: "flex",
-        gap: 10,
-        alignItems: "flex-start",
-        padding: "7px 8px",
-        borderRadius: 7,
-        cursor: "pointer",
-        background: picked[it.key] ? RAG.G.soft : "transparent"
-      },
-      children: [/*#__PURE__*/_jsxDEV("input", {
-        type: "checkbox",
-        checked: !!picked[it.key],
-        onChange: () => toggle(it.key),
-        style: {
-          width: 16,
-          height: 16,
-          accentColor: t.green,
-          marginTop: 2,
-          cursor: "pointer"
-        }
-      }, void 0, false), /*#__PURE__*/_jsxDEV("span", {
-        style: {
-          fontSize: 14,
-          color: t.ink
-        },
-        children: it.label
-      }, void 0, false)]
-    }, it.key, true))]
-  }, void 0, true);
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      textTransform: "uppercase",
+      letterSpacing: 0.6,
+      color: t.muted,
+      fontWeight: 600,
+      marginBottom: 6
+    }
+  }, title), items.map(it => /*#__PURE__*/React.createElement("label", {
+    key: it.key,
+    style: {
+      display: "flex",
+      gap: 10,
+      alignItems: "flex-start",
+      padding: "7px 8px",
+      borderRadius: 7,
+      cursor: "pointer",
+      background: picked[it.key] ? RAG.G.soft : "transparent"
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "checkbox",
+    checked: !!picked[it.key],
+    onChange: () => toggle(it.key),
+    style: {
+      width: 16,
+      height: 16,
+      accentColor: t.green,
+      marginTop: 2,
+      cursor: "pointer"
+    }
+  }), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 14,
+      color: t.ink
+    }
+  }, it.label))));
 }
-
-/* --------------------------- board -> text ------------------------- */
 function boardToText(b) {
   const l = [];
-  l.push("METRICS (latest value, target, recent trend):");
+  l.push("METRICS:");
   b.metrics.forEach(m => {
     const h = m.history;
     const last = h[h.length - 1];
-    const first = h[0];
-    const dir = h.length > 1 ? num(last.value) >= num(first.value) ? "rising" : "falling" : "n/a";
-    l.push(`- ${m.name}: ${last ? fmtVal(last.value) : "—"} (target ${m.goal}) [${RAG[m.rag].label}] trend ${dir} over ${h.length} wks (${m.owner})`);
+    const c = cumulativeOf(m);
+    l.push(`- ${m.name}: latest ${last ? fmtVal(last.value) : "—"}${c != null ? ", cumulative " + fmtVal(c) : ""} (target ${m.goal}) [${RAG[m.rag].label}] (${m.owner})`);
   });
-  l.push("ROCKS (90-day):");
+  l.push("ROCKS:");
   b.rocks.forEach(r => l.push(`- ${r.title.slice(0, 120)}: ${r.pct}% by ${r.due} [${RAG[r.rag].label}] (${r.owner})`));
   l.push("ISSUES:");
   b.issues.forEach(i => l.push(`- P${i.priority} ${i.title} [${RAG[i.rag].label}]${i.note ? " — " + i.note : ""}`));
@@ -3943,6 +3864,6 @@ function boardToText(b) {
   b.headlines.forEach(h => l.push(`- ${h.title}${h.commentary ? ": " + h.commentary : ""}${h.status ? " [" + h.status + "]" : ""}`));
   return l.join("\n");
 }
-ReactDOM.createRoot(document.getElementById("root")).render(/*#__PURE__*/_jsxDEV(App, {}, void 0, false));</script>
+ReactDOM.createRoot(document.getElementById("root")).render(/*#__PURE__*/React.createElement(App, null));</script>
 </body>
 </html>
