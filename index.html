@@ -3864,6 +3864,118 @@ function boardToText(b) {
   b.headlines.forEach(h => l.push(`- ${h.title}${h.commentary ? ": " + h.commentary : ""}${h.status ? " [" + h.status + "]" : ""}`));
   return l.join("\n");
 }
-ReactDOM.createRoot(document.getElementById("root")).render(/*#__PURE__*/React.createElement(App, null));</script>
+ReactDOM.createRoot(document.getElementById("root")).render(/*#__PURE__*/React.createElement(App, null));
+
+
+
+
+
+async function handleGenerateAI() {
+  setLoading(true);
+  try {
+    const response = await fetch("/api/generateCommentary", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        prompt: "Review the team's metrics and generate a concise executive commentary."
+      })
+    });
+
+    const result = await response.json();
+    setCommentary(result.commentary);
+  } catch (err) {
+    console.error("Failed to generate commentary:", err);
+  } finally {
+    setLoading(false);
+  }
+}
+
+const { useState, createElement: h } = React;
+
+  function App() {
+    const [loading, setLoading] = useState(false);
+    const [commentary, setCommentary] = useState("");
+
+    async function handleGenerateAI() {
+      setLoading(true);
+      try {
+        const response = await fetch("/api/generateCommentary", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            prompt: "Review the team's metrics and generate a concise executive commentary."
+          })
+        });
+
+        const result = await response.json();
+        setCommentary(result.commentary);
+      } catch (err) {
+        console.error("Failed to generate commentary:", err);
+      } finally {
+        setLoading(false);
+      }
+    }
+
+    return h("div", { style: { padding: "24px" } },
+      h("button", {
+        className: "tp-primary tp-in",
+        style: { width: "auto", cursor: "pointer", fontWeight: 600 },
+        onClick: handleGenerateAI,
+        disabled: loading
+      }, loading ? "Generating..." : "Generate with AI"),
+
+      commentary && h("div", {
+        style: {
+          marginTop: "16px",
+          padding: "12px 16px",
+          background: "#fff",
+          border: "1px solid var(--border)",
+          borderRadius: "7px",
+          color: "var(--navy)"
+        }
+      }, commentary)
+    );
+  }
+
+  const root = ReactDOM.createRoot(document.getElementById("root"));
+  root.render(h(App));
+
+  // Place this inside your React component before </body>:
+function App() {
+  const [loading, setLoading] = React.useState(false);
+  const [commentary, setCommentary] = React.useState("");
+
+  async function handleGenerateAI() {
+    setLoading(true);
+    try {
+      const response = await fetch("/api/generateCommentary", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          prompt: "Review the team's metrics and generate a concise executive commentary."
+        })
+      });
+      const result = await response.json();
+      setCommentary(result.commentary);
+    } catch (err) {
+      console.error("Failed to generate commentary:", err);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  // <--- ADD THE BUTTON HERE INSIDE THE RENDER RETURN --->
+  return React.createElement(
+    "button",
+    {
+      className: "tp-primary",
+      onClick: handleGenerateAI,
+      disabled: loading
+    },
+    loading ? "Generating..." : "Generate with AI"
+  );
+}
+  
+</script>
 </body>
 </html>
