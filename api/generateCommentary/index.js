@@ -5,7 +5,7 @@ module.exports = async function (context, req) {
     context.res = {
       status: 500,
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ error: "ANTHROPIC_API_KEY environment variable is not configured in Azure." })
+      body: JSON.stringify({ error: "ANTHROPIC_API_KEY environment variable is not set." })
     };
     return;
   }
@@ -21,7 +21,7 @@ module.exports = async function (context, req) {
         "content-type": "application/json"
       },
       body: JSON.stringify({
-        model: "claude-3-5-sonnet-20241022",
+        model: "claude-3-5-sonnet-latest",
         max_tokens: 1000,
         messages: [{ role: "user", content: prompt || "Provide a summary." }]
       })
@@ -29,22 +29,21 @@ module.exports = async function (context, req) {
 
     const data = await response.json();
 
-    // Check if Anthropic returned an error (e.g. invalid key, credit balance)
     if (!response.ok || data.error) {
       context.res = {
         status: response.status || 500,
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ error: data.error?.message || "Anthropic API error" })
+        body: JSON.stringify({ error: data.error?.message || JSON.stringify(data.error) })
       };
       return;
     }
 
-    const commentary = data.content?.[0]?.text || "No text returned by AI model.";
+    const commentary = data.content?.[0]?.text || "No commentary returned.";
 
     context.res = {
       status: 200,
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ commentary: commentary })
+      body: JSON.stringify({ commentary })
     };
   } catch (err) {
     context.res = {
