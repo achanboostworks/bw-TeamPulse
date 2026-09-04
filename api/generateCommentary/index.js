@@ -16,12 +16,12 @@ module.exports = async function (context, req) {
     const response = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {
-        "x-api-key": apiKey,
+        "x-api-key": apiKey.trim(),
         "anthropic-version": "2023-06-01",
         "content-type": "application/json"
       },
       body: JSON.stringify({
-        model: "claude-3-5-sonnet-latest",
+        model: "claude-3-haiku-20240307",
         max_tokens: 1000,
         messages: [{ role: "user", content: prompt || "Provide a summary." }]
       })
@@ -30,10 +30,11 @@ module.exports = async function (context, req) {
     const data = await response.json();
 
     if (!response.ok || data.error) {
+      const errorDetail = data.error?.message || JSON.stringify(data.error) || "Anthropic rejected the request";
       context.res = {
         status: response.status || 500,
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ error: data.error?.message || JSON.stringify(data.error) })
+        body: JSON.stringify({ error: errorDetail })
       };
       return;
     }
