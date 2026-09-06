@@ -26,7 +26,7 @@
 <body>
 <div id="root"></div>
 
-<!-- External Libraries -->
+<!-- External Libraries (UMD builds that expose global window.React, window.ReactDOM, window.msal) -->
 <script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
 <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@azure/msal-browser@3.28.0/lib/msal-browser.min.js"></script>
@@ -39,11 +39,14 @@
   const clientPrincipal = payload.clientPrincipal;
 
   if (!clientPrincipal) {
+    // Not logged in, redirect to login
     window.location.href = '/.auth/login/aad';
     return;
   }
 
+  // Check user details / claims for the email or user ID
   const userDetails = clientPrincipal.userDetails || '';
+  
   if (!userDetails.endsWith('@boostworks.co.uk')) {
     alert('Access denied. Only @boostworks.co.uk accounts are allowed.');
     window.location.href = '/.auth/logout';
@@ -63,7 +66,7 @@ window.addEventListener("error", function(e) {
 </script>
 
 <script>
-/* Team Pulse — Excel backend sync layer (Popup flow configuration). */
+/* Team Pulse — Excel backend sync layer. */
 (function(){
   var CONFIG = {
     tenantId: "a6fa4a06-5e81-4111-bea5-fbd229b24c60",
@@ -112,7 +115,8 @@ window.addEventListener("error", function(e) {
         redirectUri: window.location.origin
       },
       cache: { 
-        cacheLocation: "localStorage"
+        cacheLocation: "localStorage",
+        storeAuthStateInCookie: false
       }
     });
     return msalApp;
@@ -121,7 +125,12 @@ window.addEventListener("error", function(e) {
   var _ready = false;
   async function ensure(){ 
     if(!_ready){ 
-      await initMsal().initialize(); 
+      await initMsal().initialize();
+      if(window.location.hash && window.location.hash.indexOf("error=") === -1 && window.location.hash.indexOf("code=") === -1 && window.location.hash.indexOf("access_token=") === -1){
+        if(window.history && window.history.replaceState){
+          window.history.replaceState(null, "", window.location.pathname + window.location.search);
+        }
+      }
       _ready = true; 
     } 
   }
@@ -157,7 +166,6 @@ window.addEventListener("error", function(e) {
     }
     return res.status===204 ? null : res.json();
   }
-
   async function resolveFile(){
     if(TP._drive && TP._item) return;
     var site = await g("/sites/" + CONFIG.siteHostname + ":" + CONFIG.sitePath);
@@ -209,7 +217,6 @@ window.addEventListener("error", function(e) {
       err(e.message);
     }
   }
-
   async function connect(){
     try{
       initMsal();
