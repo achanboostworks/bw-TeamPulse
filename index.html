@@ -114,12 +114,21 @@ window.addEventListener("error", function(e) {
         authority: "https://login.microsoftonline.com/" + CONFIG.tenantId,
         redirectUri: window.location.origin
       },
-      cache: { cacheLocation: "localStorage" }
+      cache: { cacheLocation: "localStorage" },
+      system: {
+        hashHandling: "hash"
+      }
     });
     return msalApp;
   }
   var _ready = false;
-  async function ensure(){ if(!_ready){ await initMsal().initialize(); _ready = true; } }
+  async function ensure(){ 
+    if(!_ready){ 
+      await initMsal().initialize(); 
+      await msalApp.handleRedirectPromise();
+      _ready = true; 
+    } 
+  }
   async function token(){
     await ensure();
     var acct = msalApp.getActiveAccount() || msalApp.getAllAccounts()[0];
