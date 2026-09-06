@@ -26,12 +26,33 @@
 <body>
 <div id="root"></div>
 
-<!-- External Libraries (UMD builds that expose global window.React, window.ReactDOM, window.msal) -->
+<!-- External Libraries -->
 <script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
 <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@azure/msal-browser@3.28.0/lib/msal-browser.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 
+<script>
+  async function checkUserAccess() {
+    const response = await fetch('/.auth/me');
+    const payload = await response.json();
+    const clientPrincipal = payload.clientPrincipal;
+
+    if (!clientPrincipal) {
+      window.location.href = '/.auth/login/aad';
+      return;
+    }
+
+    const userDetails = clientPrincipal.userDetails || '';
+    if (!userDetails.endsWith('@boostworks.co.uk')) {
+      alert('Access denied. Only @boostworks.co.uk accounts are allowed.');
+      window.location.href = '/.auth/logout';
+    }
+  }
+
+  checkUserAccess();
+</script>
+  
 <script>
 window.addEventListener("error", function(e) {
   var r = document.getElementById("root");
@@ -42,7 +63,7 @@ window.addEventListener("error", function(e) {
 </script>
 
 <script>
-/* Team Pulse — Excel backend sync layer. */
+/* Team Pulse — Excel backend sync layer (Popup Flow Only). */
 (function(){
   var CONFIG = {
     tenantId: "a6fa4a06-5e81-4111-bea5-fbd229b24c60",
@@ -72,7 +93,6 @@ window.addEventListener("error", function(e) {
     if(!statusEl) return;
     statusEl.innerHTML = "";
     var wrap = document.createElement("span");
-    if(!TP.configured){ wrap.innerHTML = dot("#8A94A6")+"Running locally (not yet connected)"; panel.replaceChildren(wrap); return; }
     if(!TP.connected){ wrap.innerHTML = dot("#E8A317")+"Not connected"; panel.replaceChildren(wrap, btn("Connect",connect)); return; }
     wrap.innerHTML = dot("#2E9E5B")+"Connected to shared file"+(msg?" · "+msg:"");
     panel.replaceChildren(wrap, btn("Load latest",loadLatest));
@@ -83,7 +103,7 @@ window.addEventListener("error", function(e) {
   var msalApp;
   function initMsal(){
     if(msalApp) return msalApp;
-    if(typeof msal === "undefined"){ throw new Error("MSAL library failed to load from CDN. Check your network or content blocker."); }
+    if(typeof msal === "undefined"){ throw new Error("MSAL library failed to load from CDN."); }
     msalApp = new msal.PublicClientApplication({
       auth: {
         clientId: CONFIG.clientId,
@@ -94,39 +114,38 @@ window.addEventListener("error", function(e) {
     });
     return msalApp;
   }
-  var _ready = false;
-  async function ensure(){ if(!_ready){ await initMsal().initialize(); _ready = true; } }
+
   async function token(){
-    await ensure();
-    var acct = msalApp.getActiveAccount() || msalApp.getAllAccounts()[0];
-    if(!acct){
-      var r = await msalApp.loginPopup({ scopes: CONFIG.scopes });
-      msalApp.setActiveAccount(r.account);
-      acct = r.account;
+    var app = initMsal();
+    await app.initialize();
+    var accounts = app.getAllAccounts();
+    var acct = accounts[0];
+    if (!acct) {
+      var r = await app.loginPopup({ scopes: CONFIG.scopes });
+      app.setActiveAccount(r.account);
+      return r.accessToken;
     }
-    try{
-      return (await msalApp.acquireTokenSilent({ account: acct, scopes: CONFIG.scopes })).accessToken;
-    } catch(e){
-      return (await msalApp.acquireTokenPopup({ scopes: CONFIG.scopes })).accessToken;
+    app.setActiveAccount(acct);
+    try {
+      var silentRes = await app.acquireTokenSilent({ account: acct, scopes: CONFIG.scopes });
+      return silentRes.accessToken;
+    } catch (e) {
+      var popupRes = await app.acquireTokenPopup({ scopes: CONFIG.scopes });
+      return popupRes.accessToken;
     }
   }
 
-  async function g(path,method,body){
+  async function g(path, method, body){
     var t = await token();
-    var res = await fetch(path.indexOf("http")===0?path:GRAPH+path,{
+    var res = await fetch(path.indexOf("http")===0 ? path : GRAPH+path, {
       method: method || "GET",
       headers: { Authorization: "Bearer " + t, "Content-Type": "application/json" },
       body: body ? JSON.stringify(body) : undefined
     });
-    if(!res.ok){
-      var st = res.status;
-      var hint = st===403 ? "No write access to the site yet — grant the app Write on PartnershipContent (Sites.Selected)." :
-                 st===404 ? "Couldn’t find TeamPulse-Data.xlsx in the Documents library." :
-                 st===401 ? "Sign-in expired — click Connect again." : ("Error " + st);
-      throw new Error(hint + " [" + st + "]");
-    }
-    return res.status===204 ? null : res.json();
+    if(!res.ok){ throw new Error("Graph API Error " + res.status); }
+    return res.status === 204 ? null : res.json();
   }
+
   async function resolveFile(){
     if(TP._drive && TP._item) return;
     var site = await g("/sites/" + CONFIG.siteHostname + ":" + CONFIG.sitePath);
@@ -134,22 +153,25 @@ window.addEventListener("error", function(e) {
     TP._item = item.id;
     TP._drive = item.parentReference.driveId;
   }
-  function wbBase(){ return "/drives/" + TP._drive + "/items/" + TP._item + "/workbook/worksheets('" + CONFIG.dataSheet + "')"; }
+
   async function readBoard(){
     await resolveFile();
-    var r = await g(wbBase() + "/usedRange(valuesOnly=true)");
+    var base = "/drives/" + TP._drive + "/items/" + TP._item + "/workbook/worksheets('" + CONFIG.dataSheet + "')";
+    var r = await g(base + "/usedRange(valuesOnly=true)");
     var vals = (r && r.values) || [];
     var js = "";
     for(var i=1; i<vals.length; i++){ if(vals[i] && vals[i][0]) js += vals[i][0]; }
     return js ? JSON.parse(js) : null;
   }
+
   async function writeBoard(jsonStr){
     await resolveFile();
+    var base = "/drives/" + TP._drive + "/items/" + TP._item + "/workbook/worksheets('" + CONFIG.dataSheet + "')";
     var CH = 30000, chunks = [];
     for(var i=0; i<jsonStr.length; i+=CH) chunks.push([jsonStr.slice(i, i+CH)]);
     if(!chunks.length) chunks = [[""]];
-    await g(wbBase() + "/range(address='A2:A20000')/clear", 'POST', { applyTo: "Contents" });
-    await g(wbBase() + "/range(address='A2:A" + (1+chunks.length) + "')", 'PATCH', { values: chunks });
+    await g(base + "/range(address='A2:A20000')/clear", 'POST', { applyTo: "Contents" });
+    await g(base + "/range(address='A2:A" + (1+chunks.length) + "')", 'PATCH', { values: chunks });
   }
 
   var _set = Storage.prototype.setItem, pushTimer = null;
@@ -178,9 +200,9 @@ window.addEventListener("error", function(e) {
       err(e.message);
     }
   }
+
   async function connect(){
     try{
-      initMsal();
       await token();
       TP.connected = true;
       render();
@@ -192,324 +214,43 @@ window.addEventListener("error", function(e) {
 
   function boot(){
     ui();
-    if(!TP.configured){ render(); return; }
-    try{
-      initMsal();
-      ensure().then(function(){
-        var signedIn = msalApp.getAllAccounts().length > 0;
-        if(signedIn){
-          TP.connected = true;
-          render();
-          if(!sessionStorage.getItem("tp_synced")){ loadLatest(); }
-        } else {
-          render();
-        }
-      }).catch(function(e){ err(e.message); });
-    } catch(e){ err(e.message); }
+    var app = initMsal();
+    app.initialize().then(function(){
+      if(app.getAllAccounts().length > 0){
+        TP.connected = true;
+        render();
+        if(!sessionStorage.getItem("tp_synced")){ loadLatest(); }
+      }
+    }).catch(function(e){ err(e.message); });
   }
+
   if(document.readyState==="loading") document.addEventListener("DOMContentLoaded", boot); else boot();
 })();
 </script>
 
 <script>
 const { useState, useEffect, useMemo, useRef } = React;
-
 const STORAGE_KEY = "teampulse:board:v4";
 const APP_VERSION = "2.1";
 const OWNERS = ["", "Enzo", "ES", "Phil", "Kim", "Stuart", "Sofia", "All"];
 const HL_STATUS = ["", "Open", "In progress", "Complete"];
 const t = {
-  navy: "#1F2A44",
-  navyDeep: "#161F33",
-  red: "#E7442B",
-  green: "#2E9E5B",
-  amber: "#E8A317",
-  bg: "#F4F6F9",
-  card: "#FFFFFF",
-  ink: "#1F2A44",
-  body: "#4A5568",
-  muted: "#8A94A6",
-  border: "#E2E7EF",
-  borderSoft: "#EDF0F5",
-  font: "'Corbel','Segoe UI',system-ui,-apple-system,sans-serif"
+  navy: "#1F2A44", navyDeep: "#161F33", red: "#E7442B", green: "#2E9E5B", amber: "#E8A317",
+  bg: "#F4F6F9", card: "#FFFFFF", ink: "#1F2A44", body: "#4A5568", muted: "#8A94A6",
+  border: "#E2E7EF", borderSoft: "#EDF0F5", font: "'Corbel','Segoe UI',system-ui,-apple-system,sans-serif"
 };
-const RAG = {
-  G: { c: t.green, label: "On track", soft: "#E7F5EC" },
-  A: { c: t.amber, label: "At risk", soft: "#FDF3E1" },
-  R: { c: t.red, label: "Off track", soft: "#FCE7E3" }
-};
-const nextRag = v => v === "G" ? "A" : v === "A" ? "R" : "G";
-const uid = () => Math.random().toString(36).slice(2, 9);
-const today = () => new Date().toISOString().slice(0, 10);
-const nowISO = () => new Date().toISOString();
-const isOverdue = d => d && d < today();
-const fmtWhen = iso => {
-  if (!iso) return "—";
-  try {
-    return new Date(iso).toLocaleString("en-GB", {
-      day: "2-digit",
-      month: "short",
-      year: "numeric",
-      hour: "2-digit",
-      minute: "2-digit"
-    });
-  } catch (_) {
-    return "—";
-  }
-};
-const num = v => {
-  if (typeof v === "number") return v;
-  if (v == null) return NaN;
-  const s = String(v).replace(/[, ]/g, "").replace(/[£$%]/g, "");
-  return parseFloat(s);
-};
-const parseTarget = g => {
-  if (g == null) return NaN;
-  let s = String(g).replace(/[<>~ £$]/g, "").toLowerCase();
-  let m = 1;
-  if (s.endsWith("k")) {
-    m = 1e3;
-    s = s.slice(0, -1);
-  } else if (s.endsWith("m")) {
-    m = 1e6;
-    s = s.slice(0, -1);
-  }
-  const n = parseFloat(s);
-  return isNaN(n) ? NaN : n * m;
-};
-const fmtVal = v => {
-  const n = num(v);
-  if (isNaN(n)) return String(v ?? "");
-  if (Math.abs(n) >= 1000) return n.toLocaleString();
-  return String(v);
-};
-const confirmDel = msg => window.confirm(msg || "Delete this? This can't be undone.");
-function cumulativeOf(m) {
-  const tg = parseTarget(m.goal);
-  const pctTarget = !isNaN(tg) && Math.abs(tg) < 1;
-  const allFrac = m.history.length > 0 && m.history.every(h => {
-    const n = num(h.value);
-    return !isNaN(n) && Math.abs(n) <= 1;
-  });
-  if (pctTarget || allFrac) return null;
-  return m.history.reduce((a, h) => {
-    const n = num(h.value);
-    return a + (isNaN(n) ? 0 : n);
-  }, 0);
-}
 
-let _toast = null;
-const toast = m => {
-  if (_toast) _toast(m);
-};
-function ToastHost() {
-  const [msg, setMsg] = useState(null);
-  useEffect(() => {
-    _toast = m => {
-      setMsg(m);
-      clearTimeout(ToastHost._t);
-      ToastHost._t = setTimeout(() => setMsg(null), 1800);
-    };
-    return () => { _toast = null; };
-  }, []);
-  if (!msg) return null;
-  return React.createElement("div", {
-    style: {
-      position: "fixed",
-      bottom: 22,
-      left: "50%",
-      transform: "translateX(-50%)",
-      background: t.navy,
-      color: "#fff",
-      padding: "10px 18px",
-      borderRadius: 10,
-      fontSize: 14,
-      fontWeight: 600,
-      boxShadow: "0 8px 24px rgba(0,0,0,.20)",
-      zIndex: 9999
-    }
-  }, msg);
+function seed() {
+  return {
+    meta: { team: "Partner & Content — L10", weekOf: "2026-07-21", lastUpdated: null, build: null, commentaryText: "" },
+    metrics: [], rocks: [], headlines: [], issues: [], todos: [],
+    archive: { headlines: [], rocks: [], todos: [], issues: [] }
+  };
 }
-
-const ICONS = {
-  dashboard: "M4 4h7v7H4zM13 4h7v4h-7zM13 12h7v8h-7zM4 15h7v6H4z",
-  gauge: "M4 19a8 8 0 1 1 16 0M12 14l4-4",
-  target: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8M12 11.5a.5.5 0 1 0 0 1 .5.5 0 0 0 0-1",
-  news: "M4 5h16v14H4zM8 9h8M8 13h8M8 17h5",
-  alert: "M12 3l10 18H2zM12 9v5M12 18h.01",
-  check: "M4 4h16v16H4zM8 12l3 3 5-6",
-  file: "M6 3h8l4 4v14H6zM14 3v4h4M9 13h6M9 17h6",
-  sparkles: "M12 3l2 5 5 2-5 2-2 5-2-5-5-2 5-2z",
-  plus: "M12 5v14M5 12h14",
-  trash: "M4 6h16M9 6V4h6v2M6 6l1 14h10l1-14M10 10v7M14 10v7",
-  download: "M12 3v12M7 10l5 5 5-5M5 21h14",
-  reset: "M4 4v6h6M4 10a8 8 0 1 1-2 5",
-  loader: "M12 3a9 9 0 1 0 9 9",
-  chevR: "M9 6l6 6-6 6",
-  chevD: "M6 9l6 6 6-6",
-  save: "M5 3h11l3 3v15H5zM8 3v5h7M8 21v-7h8v7",
-  upload: "M12 21V9M7 14l5-5 5 5M5 3h14",
-  archive: "M3 4h18v4H3zM5 8v12h14V8M9 12h6",
-  restore: "M3 4h18v4H3zM5 8v12h14V8M12 18v-6M9 15l3-3 3 3",
-  pencil: "M4 20h4L20 8l-4-4L4 16z",
-  done: "M5 12l4 4L19 6"
-};
-function Icon({ name, size = 16, color, fill }) {
-  const filled = name === "sparkles";
-  return React.createElement("svg", {
-    width: size,
-    height: size,
-    viewBox: "0 0 24 24",
-    fill: fill || (filled ? color || "currentColor" : "none"),
-    stroke: filled ? "none" : color || "currentColor",
-    strokeWidth: "2",
-    strokeLinecap: "round",
-    strokeLinejoin: "round",
-    style: { flexShrink: 0, display: "block" }
-  }, React.createElement("path", { d: ICONS[name] || "" }));
-}
-
-const seed = () => ({
-  meta: {
-    team: "Partner & Content — L10",
-    weekOf: "2026-07-21",
-    lastUpdated: null,
-    build: null,
-    commentaryText: ""
-  },
-  metrics: [
-    {
-      id: uid(),
-      name: "Indicative CPA performance",
-      owner: "ES",
-      goal: "<55k",
-      unit: "",
-      rag: "G",
-      history: [
-        { week: "2026-04-07", value: 2025 },
-        { week: "2026-04-14", value: 7619 },
-        { week: "2026-04-21", value: 13309 },
-        { week: "2026-04-28", value: 15982 },
-        { week: "2026-05-05", value: 18191 },
-        { week: "2026-05-12", value: 21891 }
-      ]
-    },
-    {
-      id: uid(),
-      name: "Tenancy revenue",
-      owner: "ES",
-      goal: "<165k",
-      unit: "",
-      rag: "R",
-      history: [
-        { week: "2026-07-14", value: 2658 },
-        { week: "2026-07-21", value: 833 }
-      ]
-    },
-    {
-      id: uid(),
-      name: "Weekly retailer sales (Digital Vouchers)",
-      owner: "ES",
-      goal: "700k",
-      unit: "",
-      rag: "R",
-      history: [
-        { week: "2026-05-12", value: 704080 },
-        { week: "2026-05-19", value: 655442 }
-      ]
-    },
-    {
-      id: uid(),
-      name: "Weekly increase in user engagement",
-      owner: "Sofia",
-      goal: "0.025",
-      unit: "",
-      rag: "R",
-      history: [
-        { week: "2026-06-16", value: -0.018 },
-        { week: "2026-06-23", value: 0.0193 }
-      ]
-    },
-    {
-      id: uid(),
-      name: "Number of new retailers launched",
-      owner: "Kim",
-      goal: "2",
-      unit: "",
-      rag: "G",
-      history: [
-        { week: "2026-07-07", value: 5 },
-        { week: "2026-07-14", value: 3 }
-      ]
-    }
-  ],
-  rocks: [
-    {
-      id: uid(),
-      title: "Build a high-performing Commercial function by combining Affiliate and Direct models into the B2B Partnerships & Content Team.",
-      owner: "ES",
-      due: "2026-06-30",
-      pct: "0",
-      rag: "R",
-      note: "",
-      noteAt: null
-    }
-  ],
-  headlines: [
-    {
-      id: uid(),
-      title: "Wellbeing and Benefits Portal review",
-      commentary: "Future opp — explore with SD when ready",
-      commentaryAt: null,
-      owner: "",
-      status: "",
-      date: ""
-    }
-  ],
-  issues: [
-    {
-      id: uid(),
-      title: "Not able to schedule voucher promos via b/o",
-      owner: "Sofia",
-      date: "2026-05-02",
-      priority: "1",
-      rag: "A",
-      note: "",
-      noteAt: null
-    }
-  ],
-  todos: [
-    {
-      id: uid(),
-      task: "Content list, by scheme",
-      owner: "Kim",
-      raised: "2026-05-12",
-      due: "2026-05-19",
-      note: "Review on 19th May",
-      noteAt: null,
-      done: false
-    }
-  ],
-  archive: { headlines: [], rocks: [], todos: [], issues: [] }
-});
 
 function normalize(b) {
   if (!b.meta) b.meta = {};
-  if (b.meta.build !== APP_VERSION) {
-    b.meta.build = APP_VERSION;
-    b.meta.lastUpdated = nowISO();
-  }
-  if (!b.meta.lastUpdated) b.meta.lastUpdated = nowISO();
-  if (b.meta.commentaryText == null) b.meta.commentaryText = "";
   if (!b.archive) b.archive = { headlines: [], rocks: [], todos: [], issues: [] };
-  ["headlines", "rocks", "todos", "issues"].forEach(k => {
-    if (!b.archive[k]) b.archive[k] = [];
-  });
-  b.metrics = (b.metrics || []).map(m => ({
-    ...m,
-    history: (m.history || []).slice().sort((a, c) => a.week < c.week ? -1 : 1)
-  }));
-  b.headlines = (b.headlines || []).map(h => h.title != null ? { commentary: "", ...h } : { ...h, title: h.text || "", commentary: h.commentary || "" });
   return b;
 }
 
@@ -522,1386 +263,22 @@ function loadBoard() {
 }
 
 function saveBoard(b) {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(b));
-  } catch (_) {}
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(b)); } catch (_) {}
 }
 
 function App() {
   const [board, setBoard] = useState(null);
-  const [view, setView] = useState("overview");
+  useEffect(() => { setBoard(normalize(loadBoard() || seed())); }, []);
+  useEffect(() => { if (board) saveBoard(board); }, [board]);
 
-  useEffect(() => {
-    setBoard(normalize(loadBoard() || seed()));
-  }, []);
+  if (!board) return React.createElement("div", { style: { padding: 40, fontFamily: t.font } }, "Loading...");
 
-  useEffect(() => {
-    if (board) saveBoard(board);
-  }, [board]);
-
-  if (!board) return React.createElement("div", {
-    style: {
-      fontFamily: t.font,
-      background: t.bg,
-      minHeight: "100vh",
-      display: "flex",
-      alignItems: "center",
-      justifyContent: "center",
-      color: t.muted
-    }
-  }, React.createElement(Icon, { name: "loader", size: 18 }), " ", React.createElement("span", { style: { marginLeft: 8 } }, "Loading…"));
-
-  const stampNow = next => ({
-    ...next,
-    meta: {
-      ...next.meta,
-      lastUpdated: nowISO()
-    }
-  });
-  const updateBoard = u => setBoard(prev => stampNow(typeof u === "function" ? u(prev) : u));
-  const set = patch => updateBoard(b => ({ ...b, ...patch }));
-  const archiveCount = board.archive.headlines.length + board.archive.rocks.length + board.archive.todos.length + board.archive.issues.length;
-
-  const nav = [
-    { k: "overview", label: "Overview", icon: "dashboard" },
-    { k: "metrics", label: "Scorecard", icon: "gauge" },
-    { k: "rocks", label: "Rocks", icon: "target" },
-    { k: "headlines", label: "Headlines", icon: "news" },
-    { k: "issues", label: "Issues", icon: "alert" },
-    { k: "todos", label: "To-dos", icon: "check" },
-    { k: "archive", label: "Archive", icon: "archive", badge: archiveCount },
-    { k: "intake", label: "Transcript intake", icon: "file" }
-  ];
-
-  return React.createElement("div", {
-    style: {
-      fontFamily: t.font,
-      background: t.bg,
-      minHeight: "100vh",
-      color: t.body,
-      display: "flex"
-    }
-  },
-  React.createElement(ToastHost, null),
-  React.createElement("aside", {
-    className: "tp-side",
-    style: {
-      width: 216,
-      background: t.navy,
-      color: "#fff",
-      display: "flex",
-      flexDirection: "column",
-      position: "sticky",
-      top: 0,
-      height: "100vh"
-    }
-  },
-  React.createElement("div", { style: { padding: "22px 20px 16px" } },
-    React.createElement("div", { style: { fontSize: 11, letterSpacing: 2, color: "#9BA6BD", fontWeight: 600 } }, "BOOSTWORKS"),
-    React.createElement("div", { style: { fontSize: 22, fontWeight: 700, marginTop: 2, lineHeight: 1.1 } }, "Team Pulse"),
-    React.createElement("div", { style: { height: 3, width: 34, background: t.red, borderRadius: 2, marginTop: 10 } })
-  ),
-  React.createElement("nav", { style: { padding: "6px 12px", flex: 1 } },
-    nav.map(n => {
-      const active = view === n.k;
-      return React.createElement("button", {
-        key: n.k,
-        onClick: () => setView(n.k),
-        className: "tp-navbtn",
-        style: {
-          display: "flex",
-          alignItems: "center",
-          gap: 11,
-          width: "100%",
-          textAlign: "left",
-          background: active ? "rgba(231,68,43,.16)" : "transparent",
-          color: active ? "#fff" : "#C3CBDC",
-          border: "none",
-          borderLeft: active ? `3px solid ${t.red}` : "3px solid transparent",
-          padding: "10px 12px",
-          borderRadius: 7,
-          cursor: "pointer",
-          font: "inherit",
-          fontSize: 14,
-          fontWeight: active ? 600 : 500,
-          marginBottom: 2
-        }
-      },
-      React.createElement(Icon, { name: n.icon, size: 17 }), " ",
-      React.createElement("span", { style: { flex: 1 } }, n.label),
-      n.badge ? React.createElement("span", { style: { background: "rgba(255,255,255,.15)", borderRadius: 10, fontSize: 11, padding: "1px 7px" } }, n.badge) : null
-      );
-    })
-  ),
-  React.createElement("div", { style: { padding: 14, fontSize: 11, color: "#7C879E" } }, "Saved to the shared file")
-  ),
-  React.createElement("main", { style: { flex: 1, minWidth: 0 } },
-    React.createElement(TopBar, { board: board, set: set, setView: setView }),
-    React.createElement("div", { style: { padding: "22px 26px 80px", maxWidth: 1100, margin: "0 auto" } },
-      view === "overview" && React.createElement(Overview, { board: board, set: set, setView: setView }),
-      view === "metrics" && React.createElement(Metrics, { board: board, setBoard: updateBoard }),
-      view === "rocks" && React.createElement(Rocks, { board: board, setBoard: updateBoard }),
-      view === "headlines" && React.createElement(Headlines, { board: board, setBoard: updateBoard }),
-      view === "issues" && React.createElement(Issues, { board: board, setBoard: updateBoard }),
-      view === "todos" && React.createElement(Todos, { board: board, setBoard: updateBoard }),
-      view === "archive" && React.createElement(ArchiveView, { board: board, setBoard: updateBoard }),
-      view === "intake" && React.createElement(Intake, { board: board, setBoard: updateBoard, setView: setView })
-    )
-  )
-  );
-}
-
-function TopBar({ board, set, setView }) {
-  const fileRef = useRef(null);
-  const exportXlsx = () => {
-    if (typeof XLSX === "undefined") {
-      toast("Excel export library missing");
-      return;
-    }
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(board.metrics.map(m => {
-      const last = m.history[m.history.length - 1];
-      const c = cumulativeOf(m);
-      return {
-        Metric: m.name,
-        Owner: m.owner,
-        Target: m.goal,
-        Latest: last ? last.value : "",
-        Cumulative: c == null ? "" : c,
-        Status: RAG[m.rag].label
-      };
-    })), "Scorecard");
-    const hist = [];
-    board.metrics.forEach(m => m.history.forEach(h => hist.push({
-      Metric: m.name,
-      Week: h.week,
-      Value: h.value
-    })));
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(hist.length ? hist : [{ Metric: "" }]), "Scorecard history");
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(board.rocks.map(r => ({
-      Rock: r.title,
-      Owner: r.owner,
-      "Due date": r.due,
-      "% complete": r.pct,
-      Status: RAG[r.rag].label,
-      Note: r.note || ""
-    }))), "Rocks");
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(board.headlines.length ? board.headlines.map(h => ({
-      Headline: h.title,
-      Commentary: h.commentary || "",
-      Owner: h.owner,
-      Status: h.status,
-      Date: h.date
-    })) : [{ Headline: "" }]), "Headlines");
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(board.issues.map(i => ({
-      "Raised by": i.owner,
-      "Date raised": i.date || "",
-      Issue: i.title,
-      Commentary: i.note || "",
-      Priority: i.priority,
-      Status: RAG[i.rag].label
-    }))), "Issue log");
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(board.todos.map(d => ({
-      Description: d.task,
-      Owner: d.owner,
-      "Raised on": d.raised || "",
-      "Due date": d.due,
-      Commentary: d.note || "",
-      Done: d.done ? "Yes" : "No"
-    }))), "7 Day To-Do's");
-    const out = XLSX.write(wb, { bookType: "xlsx", type: "array" });
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(new Blob([out], { type: "application/octet-stream" }));
-    a.download = `TeamPulse_${board.meta.weekOf}.xlsx`;
-    a.click();
-    toast("Exported");
-  };
-
-  const reset = () => {
-    if (confirm("Reload from sample data? Current entries clear.")) {
-      set(seed());
-      setView("overview");
-      toast("Reset");
-    }
-  };
-
-  const saveBackup = () => {
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(new Blob([JSON.stringify(board, null, 2)], { type: "application/json" }));
-    a.download = `TeamPulse_backup_${board.meta.weekOf}.json`;
-    a.click();
-    toast("Backup saved");
-  };
-
-  const restore = e => {
-    const f = e.target.files && e.target.files[0];
-    if (!f) return;
-    const rd = new FileReader();
-    rd.onload = () => {
-      try {
-        const d = JSON.parse(String(rd.result));
-        if (!d.metrics || !d.rocks || !d.todos) throw new Error("Not a Team Pulse backup.");
-        if (confirm("Replace the current board with this backup?")) {
-          set(normalize(d));
-          setView("overview");
-          toast("Restored");
-        }
-      } catch (err) {
-        alert("Couldn't read that file — " + (err.message || "invalid backup."));
-      } finally {
-        e.target.value = "";
-      }
-    };
-    rd.readAsText(f);
-  };
-
-  return React.createElement("div", {
-    style: {
-      background: "#fff",
-      borderBottom: `1px solid ${t.border}`,
-      padding: "14px 26px",
-      display: "flex",
-      alignItems: "center",
-      gap: 14,
-      flexWrap: "wrap"
-    }
-  },
-  React.createElement("div", { style: { flex: 1, minWidth: 220 } },
-    React.createElement("input", {
-      className: "tp-in",
-      value: board.meta.team,
-      onChange: e => set({ meta: { ...board.meta, team: e.target.value } }),
-      style: { border: "none", padding: 0, fontSize: 18, fontWeight: 700, color: t.ink }
-    }),
-    React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10, marginTop: 2, fontSize: 13, color: t.muted, flexWrap: "wrap" } },
-      React.createElement("span", null, "Week of ", React.createElement("input", {
-        type: "date",
-        value: board.meta.weekOf,
-        onChange: e => set({ meta: { ...board.meta, weekOf: e.target.value } }),
-        style: { border: "none", font: "inherit", color: t.body, background: "transparent" }
-      })),
-      React.createElement("span", { style: { color: t.border } }, "|"),
-      React.createElement("span", null, "Last updated ", React.createElement("strong", { style: { color: t.body, fontWeight: 600 } }, fmtWhen(board.meta.lastUpdated))),
-      React.createElement("span", { style: { color: t.border } }, "|"),
-      React.createElement("span", null, "Build ", React.createElement("strong", { style: { color: t.body, fontWeight: 600 } }, "v", APP_VERSION))
-    )
-  ),
-  React.createElement("button", { onClick: exportXlsx, className: "tp-ghost", style: { ...btnGhost, display: "flex", alignItems: "center", gap: 7 } },
-    React.createElement(Icon, { name: "download", size: 15 }), " Export"
-  ),
-  React.createElement("button", { onClick: saveBackup, className: "tp-ghost", style: { ...btnGhost, display: "flex", alignItems: "center", gap: 7 } },
-    React.createElement(Icon, { name: "save", size: 15 }), " Backup"
-  ),
-  React.createElement("button", { onClick: () => fileRef.current && fileRef.current.click(), className: "tp-ghost", style: { ...btnGhost, display: "flex", alignItems: "center", gap: 7 } },
-    React.createElement(Icon, { name: "upload", size: 15 }), " Restore"
-  ),
-  React.createElement("input", { ref: fileRef, type: "file", accept: "application/json,.json", onChange: restore, style: { display: "none" } }),
-  React.createElement("button", { onClick: reset, className: "tp-ghost", style: { ...btnGhost, color: t.muted, display: "flex", alignItems: "center", gap: 7 } },
-    React.createElement(Icon, { name: "reset", size: 14 }), " Reset"
-  )
-  );
-}
-
-function Overview({ board, set, setView }) {
-  const [loading, setLoading] = useState(false);
-
-  const counts = useMemo(() => {
-    const c = { G: 0, A: 0, R: 0 };
-    board.metrics.forEach(m => c[m.rag]++);
-    board.rocks.forEach(r => c[r.rag]++);
-    board.issues.forEach(i => c[i.rag]++);
-    return c;
-  }, [board]);
-
-  const overdue = board.todos.filter(d => !d.done && isOverdue(d.due)).length;
-  const openTodos = board.todos.filter(d => !d.done).length;
-
-  async function handleGenerateAI() {
-    setLoading(true);
-    try {
-      const response = await fetch("/api/generateCommentary", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          prompt: "Board Summary:\n\n" + boardToText(board) + "\n\nProvide an executive commentary focusing on Red/Amber metrics and overdue items."
-        })
-      });
-      if (!response.ok) throw new Error("API call failed with status " + response.status);
-      const result = await response.json();
-      set({ meta: { ...board.meta, commentaryText: result.commentary || "" } });
-      toast("Commentary generated");
-    } catch (err) {
-      console.error("Failed to generate commentary:", err);
-      toast(err.message || "Failed to generate commentary");
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  const attention = [
-    ...board.metrics.map(m => ({ ...m, kind: "Metric", name: m.name })),
-    ...board.rocks.map(r => ({ ...r, kind: "Rock", name: r.title })),
-    ...board.issues.map(i => ({ ...i, kind: "Issue", name: i.title }))
-  ].filter(x => x.rag !== "G").sort((a, b) => (a.rag === "R" ? 0 : 1) - (b.rag === "R" ? 0 : 1));
-
-  return React.createElement("div", null,
-    React.createElement(SectionTitle, { sub: "A one-glance read on where the team stands this week." }, "Overview"),
-    React.createElement("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))", gap: 12, marginBottom: 18 } },
-      React.createElement(HealthTile, { n: counts.G, label: "On track", c: t.green }),
-      React.createElement(HealthTile, { n: counts.A, label: "At risk", c: t.amber }),
-      React.createElement(HealthTile, { n: counts.R, label: "Off track", c: t.red }),
-      React.createElement(HealthTile, { n: board.issues.length, label: "Open issues", c: t.navy, onClick: () => setView("issues") }),
-      React.createElement(HealthTile, { n: `${openTodos}${overdue ? ` · ${overdue} late` : ""}`, label: "To-dos open", c: overdue ? t.red : t.navy, onClick: () => setView("todos") })
-    ),
-    React.createElement("div", { style: card },
-      React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8, flexWrap: "wrap", gap: 8 } },
-        React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, fontWeight: 700, color: t.ink, fontSize: 15 } },
-          React.createElement(Icon, { name: "sparkles", size: 16, color: t.red }), " Recommendations & commentary"
-        ),
-        React.createElement("div", { style: { display: "flex", gap: 8, alignItems: "center" } },
-          React.createElement("button", {
-            className: "tp-primary",
-            onClick: handleGenerateAI,
-            disabled: loading,
-            style: { ...btnPrimary, display: "flex", alignItems: "center", gap: 7, opacity: loading ? 0.7 : 1 }
-          },
-          loading ? React.createElement(Icon, { name: "loader", size: 14 }) : React.createElement(Icon, { name: "sparkles", size: 14 }),
-          loading ? "Generating..." : "Generate with AI"
-          )
-        )
-      ),
-      React.createElement("textarea", {
-        className: "tp-in",
-        value: board.meta.commentaryText || "",
-        onChange: e => set({ meta: { ...board.meta, commentaryText: e.target.value } }),
-        rows: 5,
-        placeholder: "Type this week's commentary, or generate it with AI…",
-        style: { resize: "vertical", fontSize: 14, lineHeight: 1.55 }
-      })
-    ),
-    React.createElement("div", { style: { ...card, marginTop: 16 } },
-      React.createElement("div", { style: { fontWeight: 700, color: t.ink, fontSize: 15, marginBottom: 10 } }, "Needs attention"),
-      attention.map(x => React.createElement("div", {
-        key: x.kind + x.id,
-        className: "tp-row",
-        style: { display: "flex", alignItems: "center", gap: 10, padding: "9px 6px", borderBottom: `1px solid ${t.borderSoft}` }
-      },
-      React.createElement(Dot, { rag: x.rag }),
-      React.createElement("span", { style: { fontSize: 11, color: t.muted, width: 52, textTransform: "uppercase", letterSpacing: 0.5, flexShrink: 0 } }, x.kind),
-      React.createElement("span", { style: { color: t.ink, fontSize: 14 } }, x.name.length > 90 ? x.name.slice(0, 90) + "…" : x.name),
-      x.owner && React.createElement("span", { style: { marginLeft: "auto", fontSize: 12, color: t.muted, flexShrink: 0 } }, x.owner)
-      )),
-      attention.length === 0 && React.createElement("div", { style: { color: t.green, fontSize: 14 } }, "Everything's green. Nice week.")
+  return React.createElement("div", { style: { fontFamily: t.font, background: t.bg, minHeight: "100vh", color: t.body, display: "flex" } },
+    React.createElement("div", { style: { padding: 40, flex: 1 } },
+      React.createElement("h1", { style: { color: t.ink } }, board.meta.team),
+      React.createElement("p", null, "Dashboard active. Click the bottom-right widget to connect via MSAL popup and sync with Excel.")
     )
   );
-}
-
-function HealthTile({ n, label, c, onClick }) {
-  return React.createElement("div", {
-    onClick: onClick,
-    style: { background: t.card, border: `1px solid ${t.border}`, borderRadius: 12, padding: "16px", cursor: onClick ? "pointer" : "default", position: "relative", overflow: "hidden" }
-  },
-  React.createElement("div", { style: { position: "absolute", left: 0, top: 0, bottom: 0, width: 4, background: c } }),
-  React.createElement("div", { style: { fontSize: 30, fontWeight: 800, color: t.ink, lineHeight: 1 } }, n),
-  React.createElement("div", { style: { fontSize: 12.5, color: t.muted, marginTop: 6 } }, label)
-  );
-}
-
-function SectionTitle({ children, sub }) {
-  return React.createElement("div", { style: { marginBottom: 16 } },
-    React.createElement("h1", { style: { margin: 0, fontSize: 24, fontWeight: 800, color: t.ink, letterSpacing: -0.3 } }, children),
-    sub && React.createElement("div", { style: { color: t.muted, fontSize: 14, marginTop: 3 } }, sub)
-  );
-}
-
-function RagChip({ value, onChange }) {
-  const r = RAG[value];
-  return React.createElement("button", {
-    onClick: () => onChange(nextRag(value)),
-    title: "Click to change status",
-    className: "tp-chipbtn",
-    style: {
-      display: "inline-flex",
-      alignItems: "center",
-      gap: 6,
-      background: r.soft,
-      color: r.c,
-      border: `1px solid ${r.c}33`,
-      borderRadius: 20,
-      padding: "4px 10px",
-      cursor: "pointer",
-      font: "inherit",
-      fontSize: 12.5,
-      fontWeight: 600,
-      whiteSpace: "nowrap"
-    }
-  },
-  React.createElement("span", { style: { width: 8, height: 8, borderRadius: 8, background: r.c } }), " ", r.label
-  );
-}
-
-function Dot({ rag }) {
-  return React.createElement("span", { style: { width: 9, height: 9, borderRadius: 9, background: RAG[rag].c, flexShrink: 0 } });
-}
-
-const card = { background: t.card, border: `1px solid ${t.border}`, borderRadius: 12, padding: 18 };
-const btnPrimary = { background: t.navy, color: "#fff", border: "none", borderRadius: 8, padding: "8px 14px", cursor: "pointer", font: "inherit", fontSize: 13.5, fontWeight: 600 };
-const btnGhost = { background: "#fff", color: t.ink, border: `1px solid ${t.border}`, borderRadius: 8, padding: "8px 13px", cursor: "pointer", font: "inherit", fontSize: 13.5, fontWeight: 600 };
-const btnAdd = { display: "inline-flex", alignItems: "center", gap: 6, background: "transparent", color: t.navy, border: `1px dashed ${t.border}`, borderRadius: 8, padding: "9px 13px", cursor: "pointer", font: "inherit", fontSize: 13.5, fontWeight: 600, marginTop: 6 };
-const notice = (c, soft) => ({ background: soft, color: c, border: `1px solid ${c}33`, borderRadius: 8, padding: "9px 12px", fontSize: 13.5, marginBottom: 10 });
-const th = { textAlign: "left", fontSize: 11, textTransform: "uppercase", letterSpacing: 0.6, color: t.muted, fontWeight: 600, padding: "0 10px 8px" };
-const td = { padding: "6px 10px", verticalAlign: "middle" };
-
-function Cell({ value, onChange, type = "text", w, right, placeholder }) {
-  return React.createElement("input", {
-    className: "tp-in",
-    type: type,
-    value: value,
-    placeholder: placeholder,
-    onChange: e => onChange(e.target.value),
-    style: { width: w || "100%", textAlign: right ? "right" : "left" }
-  });
-}
-
-function DelBtn({ onClick, title = "Remove" }) {
-  return React.createElement("span", { className: "tp-icon", onClick: onClick, title: title },
-    React.createElement(Icon, { name: "trash", size: 15 })
-  );
-}
-
-function ArchiveBtn({ onClick }) {
-  return React.createElement("span", { className: "tp-icon", onClick: onClick, title: "Move to archive" },
-    React.createElement(Icon, { name: "archive", size: 15 })
-  );
-}
-
-function MoveBtn({ onClick, icon, title }) {
-  return React.createElement("span", { className: "tp-icon", onClick: onClick, title: title },
-    React.createElement(Icon, { name: icon, size: 15 })
-  );
-}
-
-function EditToggle({ on, onClick }) {
-  return React.createElement("span", { className: "tp-icon", onClick: onClick, title: on ? "Finish editing" : "Edit details", style: { color: on ? t.green : t.muted } },
-    React.createElement(Icon, { name: on ? "done" : "pencil", size: 16 })
-  );
-}
-
-function OwnerSelect({ value, onChange, w }) {
-  return React.createElement("select", {
-    className: "tp-in",
-    value: value || "",
-    onChange: e => onChange(e.target.value),
-    style: { width: w || 130 }
-  }, OWNERS.map(o => React.createElement("option", { key: o, value: o }, o || "—")));
-}
-
-function Locked({ label, value }) {
-  return React.createElement("span", { style: { fontSize: 13, color: t.body } },
-    React.createElement("span", { style: { color: t.muted } }, label, ": "),
-    React.createElement("strong", { style: { color: t.ink, fontWeight: 600 } }, value || "—")
-  );
-}
-
-function Stamp({ at, verb = "updated" }) {
-  if (!at) return null;
-  return React.createElement("div", { style: { fontSize: 11, color: t.muted, marginTop: 4 } }, verb, " ", fmtWhen(at));
-}
-
-function Spark({ history, color }) {
-  const vals = history.map(h => num(h.value)).filter(v => !isNaN(v));
-  if (vals.length < 2) return React.createElement("span", { style: { color: t.muted, fontSize: 12 } }, "—");
-  const w = 96, h = 26, min = Math.min(...vals), max = Math.max(...vals), rng = max - min || 1;
-  const pts = vals.map((v, i) => `${i / (vals.length - 1) * (w - 2) + 1},${h - 2 - (v - min) / rng * (h - 4)}`).join(" ");
-  const up = vals[vals.length - 1] >= vals[0];
-  return React.createElement("svg", { width: w, height: h, style: { display: "block" } },
-    React.createElement("polyline", {
-      points: pts,
-      fill: "none",
-      stroke: color || (up ? t.green : t.red),
-      strokeWidth: "1.6",
-      strokeLinejoin: "round",
-      strokeLinecap: "round"
-    })
-  );
-}
-
-function Trend({ history, target, color }) {
-  const data = history.map(h => ({ week: h.week, v: num(h.value) })).filter(d => !isNaN(d.v));
-  if (data.length < 2) return React.createElement("div", { style: { color: t.muted, fontSize: 13, padding: "12px 0" } }, "Not enough data points yet to plot a trend.");
-  const W = 620, H = 200, padL = 52, padR = 16, padT = 14, padB = 34;
-  const tgt = parseTarget(target);
-  const vals = data.map(d => d.v).concat(isNaN(tgt) ? [] : [tgt]);
-  let min = Math.min(...vals), max = Math.max(...vals);
-  if (min === max) { min -= 1; max += 1; }
-  const pad = (max - min) * 0.1;
-  min -= pad; max += pad;
-  const x = i => padL + i / (data.length - 1) * (W - padL - padR);
-  const y = v => padT + (1 - (v - min) / (max - min)) * (H - padT - padB);
-  const line = data.map((d, i) => `${x(i)},${y(d.v)}`).join(" ");
-  const fmt = v => Math.abs(v) >= 1000 ? Math.round(v).toLocaleString() : Math.abs(v) < 1 ? v.toFixed(3) : String(Math.round(v * 100) / 100);
-
-  return React.createElement("svg", { width: "100%", viewBox: `0 0 ${W} ${H}`, style: { display: "block" } },
-    React.createElement("line", { x1: padL, y1: padT, x2: padL, y2: H - padB, stroke: t.border }),
-    React.createElement("line", { x1: padL, y1: H - padB, x2: W - padR, y2: H - padB, stroke: t.border }),
-    React.createElement("text", { x: padL - 6, y: y(max) + 4, textAnchor: "end", fontSize: "10", fill: t.muted }, fmt(max)),
-    React.createElement("text", { x: padL - 6, y: y(min) + 4, textAnchor: "end", fontSize: "10", fill: t.muted }, fmt(min)),
-    !isNaN(tgt) && tgt >= min && tgt <= max && React.createElement("g", null,
-      React.createElement("line", { x1: padL, y1: y(tgt), x2: W - padR, y2: y(tgt), stroke: t.amber, strokeWidth: "1", strokeDasharray: "4 3" }),
-      React.createElement("text", { x: W - padR, y: y(tgt) - 4, textAnchor: "end", fontSize: "10", fill: t.amber }, "target ", fmt(tgt))
-    ),
-    React.createElement("polyline", { points: line, fill: "none", stroke: color || t.navy, strokeWidth: "2", strokeLinejoin: "round", strokeLinecap: "round" }),
-    data.map((d, i) => React.createElement("circle", { key: i, cx: x(i), cy: y(d.v), r: "3", fill: color || t.navy }, React.createElement("title", null, d.week, ": ", fmtVal(d.v)))),
-    React.createElement("text", { x: padL, y: H - padB + 16, fontSize: "10", fill: t.muted }, data[0].week.slice(5)),
-    React.createElement("text", { x: W - padR, y: H - padB + 16, textAnchor: "end", fontSize: "10", fill: t.muted }, data[data.length - 1].week.slice(5))
-  );
-}
-
-function WeeklyEntry({ defaultWeek, onSave }) {
-  const [wk, setWk] = useState(defaultWeek);
-  const [val, setVal] = useState("");
-  useEffect(() => { setWk(defaultWeek); }, [defaultWeek]);
-  const submit = () => { if (onSave(wk, val)) setVal(""); };
-  return React.createElement("div", {
-    style: { display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", background: "#fff", border: `1px solid ${t.border}`, borderRadius: 8, padding: "10px 12px" }
-  },
-  React.createElement("span", { style: { fontSize: 12, color: t.muted, fontWeight: 600 } }, "Record a value:"),
-  React.createElement("input", { className: "tp-in", type: "date", value: wk, onChange: e => setWk(e.target.value), style: { width: 150 } }),
-  React.createElement("input", { className: "tp-in", value: val, onChange: e => setVal(e.target.value), onKeyDown: e => { if (e.key === "Enter") submit(); }, placeholder: "Value", style: { width: 120, textAlign: "right" } }),
-  React.createElement("button", { onClick: submit, className: "tp-primary", style: { ...btnPrimary, display: "flex", alignItems: "center", gap: 6 } },
-    React.createElement(Icon, { name: "save", size: 14 }), " Save"
-  )
-  );
-}
-
-function Metrics({ board, setBoard }) {
-  const [open, setOpen] = useState(null);
-  const up = (id, patch) => setBoard(b => ({
-    ...b,
-    metrics: b.metrics.map(m => m.id === id ? { ...m, ...patch } : m)
-  }));
-  const add = () => setBoard(b => ({
-    ...b,
-    metrics: [...b.metrics, { id: uid(), name: "", owner: "", goal: "", unit: "", rag: "A", history: [] }]
-  }));
-  const del = id => {
-    if (!confirmDel("Delete this metric and all its weekly values?")) return;
-    setBoard(b => ({ ...b, metrics: b.metrics.filter(m => m.id !== id) }));
-    toast("Metric deleted");
-  };
-  const sortHist = a => a.slice().sort((x, y) => x.week < y.week ? -1 : 1);
-  const saveWeek = (m, week, value) => {
-    if (!week) { toast("Pick a week date"); return false; }
-    if (value === "" || isNaN(num(value))) { toast("Enter a number"); return false; }
-    const exists = m.history.some(h => h.week === week);
-    const history = sortHist(exists ? m.history.map(h => h.week === week ? { ...h, value } : h) : [...m.history, { week, value }]);
-    up(m.id, { history });
-    toast(exists ? `Updated ${week}` : `Saved ${week}`);
-    return true;
-  };
-  const editWeek = (m, week, value) => up(m.id, { history: m.history.map(h => h.week === week ? { ...h, value } : h) });
-  const delWeek = (m, week) => {
-    if (!confirmDel(`Delete the entry for ${week}?`)) return;
-    up(m.id, { history: m.history.filter(h => h.week !== week) });
-    toast("Entry deleted");
-  };
-
-  return React.createElement("div", null,
-    React.createElement(SectionTitle, { sub: "Weekly numbers with trend history. Target is fixed here — expand a metric to change it. Cumulative is the running total to date." }, "Scorecard"),
-    React.createElement("div", { style: card },
-      React.createElement("div", { style: { overflowX: "auto" } },
-        React.createElement("table", { style: { width: "100%", borderCollapse: "collapse", minWidth: 720 } },
-          React.createElement("thead", null,
-            React.createElement("tr", null,
-              React.createElement("th", { style: th }, "Metric"),
-              React.createElement("th", { style: th }, "Owner"),
-              React.createElement("th", { style: th }, "Target"),
-              React.createElement("th", { style: th }, "Latest"),
-              React.createElement("th", { style: th }, "Cumulative"),
-              React.createElement("th", { style: th }, "Trend"),
-              React.createElement("th", { style: th }, "Status"),
-              React.createElement("th", { style: th })
-            )
-          ),
-          React.createElement("tbody", null,
-            board.metrics.map(m => {
-              const sorted = sortHist(m.history);
-              const last = sorted[sorted.length - 1];
-              const cum = cumulativeOf(m);
-              const isOpen = open === m.id;
-              const col = m.rag === "R" ? t.red : m.rag === "A" ? t.amber : t.green;
-              return React.createElement(React.Fragment, { key: m.id },
-                React.createElement("tr", { className: "tp-row" },
-                  React.createElement("td", { style: { ...td, minWidth: 230 } },
-                    React.createElement("span", { onClick: () => setOpen(isOpen ? null : m.id), className: "tp-icon", style: { marginRight: 6, verticalAlign: "middle" } },
-                      React.createElement(Icon, { name: isOpen ? "chevD" : "chevR", size: 15 })
-                    ),
-                    React.createElement("input", {
-                      className: "tp-in",
-                      value: m.name,
-                      onChange: e => up(m.id, { name: e.target.value }),
-                      style: { width: "80%", display: "inline-block" }
-                    })
-                  ),
-                  React.createElement("td", { style: td },
-                    React.createElement(OwnerSelect, { value: m.owner, onChange: v => up(m.id, { owner: v }), w: 100 })
-                  ),
-                  React.createElement("td", { style: { ...td, fontWeight: 600, color: t.ink, whiteSpace: "nowrap" } }, m.goal || "—"),
-                  React.createElement("td", { style: { ...td, fontWeight: 700, color: t.ink, textAlign: "right", whiteSpace: "nowrap" } }, last ? fmtVal(last.value) : "—"),
-                  React.createElement("td", { style: { ...td, textAlign: "right", color: t.body, whiteSpace: "nowrap" } }, cum == null ? "—" : fmtVal(cum)),
-                  React.createElement("td", { style: td }, React.createElement(Spark, { history: sorted, color: col })),
-                  React.createElement("td", { style: td }, React.createElement(RagChip, { value: m.rag, onChange: v => up(m.id, { rag: v }) })),
-                  React.createElement("td", { style: { ...td, textAlign: "right" } }, React.createElement(DelBtn, { onClick: () => del(m.id) }))
-                ),
-                isOpen && React.createElement("tr", null,
-                  React.createElement("td", { colSpan: 8, style: { padding: "4px 10px 18px" } },
-                    React.createElement("div", { style: { background: t.bg, border: `1px solid ${t.border}`, borderRadius: 10, padding: 16 } },
-                      React.createElement("div", { style: { display: "flex", gap: 12, alignItems: "center", marginBottom: 14, flexWrap: "wrap" } },
-                        React.createElement("span", { style: { fontSize: 12, color: t.muted, fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.5 } }, "Target (fixed — change here)"),
-                        React.createElement("input", { className: "tp-in", value: m.goal, onChange: e => up(m.id, { goal: e.target.value }), style: { width: 130 } })
-                      ),
-                      React.createElement("div", { style: { marginBottom: 14 } },
-                        React.createElement(WeeklyEntry, { defaultWeek: board.meta.weekOf, onSave: (w, v) => saveWeek(m, w, v) })
-                      ),
-                      React.createElement("div", { style: { display: "flex", gap: 20, flexWrap: "wrap" } },
-                        React.createElement("div", { style: { flex: "1 1 340px", minWidth: 300 } },
-                          React.createElement("div", { style: { fontSize: 12, color: t.muted, fontWeight: 600, marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.5 } }, "Trend"),
-                          React.createElement(Trend, { history: sorted, target: m.goal, color: col })
-                        ),
-                        React.createElement("div", { style: { flex: "0 0 280px", maxWidth: 320 } },
-                          React.createElement("div", { style: { fontSize: 12, color: t.muted, fontWeight: 600, marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.5 } }, "Weekly values (", sorted.length, ")"),
-                          React.createElement("div", { style: { maxHeight: 200, overflowY: "auto" } },
-                            sorted.map(h => React.createElement("div", { key: h.week, style: { display: "flex", gap: 8, alignItems: "center", marginBottom: 5 } },
-                              React.createElement("span", { style: { width: 150, fontSize: 12.5, color: t.body } }, h.week),
-                              React.createElement("input", { className: "tp-in", value: h.value, onChange: e => editWeek(m, h.week, e.target.value), style: { width: 90, fontSize: 12.5, padding: "5px 7px", textAlign: "right" } }),
-                              React.createElement(DelBtn, { onClick: () => delWeek(m, h.week) })
-                            )),
-                            sorted.length === 0 && React.createElement("div", { style: { color: t.muted, fontSize: 13 } }, "No values yet — record one above.")
-                          )
-                        )
-                      )
-                    )
-                  )
-                )
-              );
-            })
-          )
-        )
-      ),
-      React.createElement("button", { onClick: add, style: btnAdd }, React.createElement(Icon, { name: "plus", size: 15 }), " Add metric")
-    )
-  );
-}
-
-function Rocks({ board, setBoard }) {
-  const [editId, setEditId] = useState(null);
-  const up = (id, patch) => setBoard(b => ({
-    ...b,
-    rocks: b.rocks.map(r => r.id === id ? { ...r, ...patch } : r)
-  }));
-  const setNote = (id, val) => up(id, { note: val, noteAt: nowISO() });
-  const add = () => {
-    const id = uid();
-    setBoard(b => ({
-      ...b,
-      rocks: [...b.rocks, { id, title: "", owner: "", due: "", pct: "0", rag: "A", note: "", noteAt: null }]
-    }));
-    setEditId(id);
-  };
-  const del = id => {
-    if (!confirmDel("Delete this rock?")) return;
-    setBoard(b => ({ ...b, rocks: b.rocks.filter(r => r.id !== id) }));
-    toast("Rock deleted");
-  };
-  const archive = id => setBoard(b => {
-    const it = b.rocks.find(r => r.id === id);
-    if (!it) return b;
-    toast("Archived");
-    return {
-      ...b,
-      rocks: b.rocks.filter(r => r.id !== id),
-      archive: { ...b.archive, rocks: [{ ...it, archivedOn: today() }, ...b.archive.rocks] }
-    };
-  });
-
-  return React.createElement("div", null,
-    React.createElement(SectionTitle, { sub: "90-day objectives. Objective, owner and due date are fixed — click the pencil to change them. Progress, status and notes update freely." }, "Rocks"),
-    board.rocks.map(r => {
-      const ed = editId === r.id;
-      return React.createElement("div", { key: r.id, style: { ...card, marginBottom: 12 } },
-        React.createElement("div", { style: { display: "flex", gap: 12, alignItems: "flex-start", justifyContent: "space-between" } },
-          React.createElement("div", { style: { flex: 1 } },
-            ed ? React.createElement("textarea", {
-              className: "tp-in",
-              value: r.title,
-              onChange: e => up(r.id, { title: e.target.value }),
-              rows: 3,
-              placeholder: "Objective",
-              style: { resize: "vertical" }
-            }) : React.createElement("div", { style: { fontSize: 15, fontWeight: 600, color: t.ink, lineHeight: 1.4 } }, r.title || "—"),
-            React.createElement("div", { style: { display: "flex", gap: 16, alignItems: "center", marginTop: 8, flexWrap: "wrap" } },
-              ed ? React.createElement("span", { style: { display: "flex", alignItems: "center", gap: 6 } },
-                React.createElement("span", { style: { fontSize: 12, color: t.muted } }, "Owner"),
-                React.createElement(OwnerSelect, { value: r.owner, onChange: v => up(r.id, { owner: v }) })
-              ) : React.createElement(Locked, { label: "Owner", value: r.owner }),
-              ed ? React.createElement("span", { style: { display: "flex", alignItems: "center", gap: 6 } },
-                React.createElement("span", { style: { fontSize: 12, color: t.muted } }, "Due"),
-                React.createElement("input", { className: "tp-in", type: "date", value: r.due, onChange: e => up(r.id, { due: e.target.value }), style: { width: 150 } })
-              ) : React.createElement(Locked, { label: "Due", value: r.due })
-            )
-          ),
-          React.createElement(EditToggle, { on: ed, onClick: () => setEditId(ed ? null : r.id) })
-        ),
-        React.createElement("div", { style: { display: "flex", gap: 16, alignItems: "center", marginTop: 14, flexWrap: "wrap" } },
-          React.createElement("div", { style: { flex: 1, minWidth: 180 } },
-            React.createElement("div", { style: { display: "flex", justifyContent: "space-between", fontSize: 12, color: t.muted, marginBottom: 5 } },
-              React.createElement("span", null, "Progress"),
-              React.createElement("span", { style: { fontWeight: 700, color: t.ink } }, r.pct || 0, "%")
-            ),
-            React.createElement("input", {
-              type: "range",
-              min: "0",
-              max: "100",
-              value: r.pct || 0,
-              onChange: e => up(r.id, { pct: e.target.value }),
-              style: { width: "100%", accentColor: RAG[r.rag].c }
-            })
-          ),
-          React.createElement(RagChip, { value: r.rag, onChange: v => up(r.id, { rag: v }) }),
-          React.createElement(ArchiveBtn, { onClick: () => archive(r.id) }),
-          React.createElement(DelBtn, { onClick: () => del(r.id) })
-        ),
-        React.createElement("textarea", {
-          className: "tp-in",
-          value: r.note || "",
-          onChange: e => setNote(r.id, e.target.value),
-          placeholder: "Progress note…",
-          rows: 2,
-          style: { marginTop: 12, fontSize: 13, color: t.body, resize: "vertical" }
-        }),
-        React.createElement(Stamp, { at: r.noteAt })
-      );
-    }),
-    React.createElement("button", { onClick: add, style: btnAdd }, React.createElement(Icon, { name: "plus", size: 15 }), " Add rock")
-  );
-}
-
-function Headlines({ board, setBoard }) {
-  const [editId, setEditId] = useState(null);
-  const up = (id, patch) => setBoard(b => ({
-    ...b,
-    headlines: b.headlines.map(h => h.id === id ? { ...h, ...patch } : h)
-  }));
-  const setComment = (id, val) => up(id, { commentary: val, commentaryAt: nowISO() });
-  const add = () => {
-    const id = uid();
-    setBoard(b => ({
-      ...b,
-      headlines: [...b.headlines, { id, title: "", commentary: "", commentaryAt: null, owner: "", status: "", date: "" }]
-    }));
-    setEditId(id);
-  };
-  const del = id => {
-    if (!confirmDel("Delete this headline?")) return;
-    setBoard(b => ({ ...b, headlines: b.headlines.filter(h => h.id !== id) }));
-    toast("Headline deleted");
-  };
-  const archive = id => setBoard(b => {
-    const it = b.headlines.find(h => h.id === id);
-    if (!it) return b;
-    toast("Archived");
-    return {
-      ...b,
-      headlines: b.headlines.filter(h => h.id !== id),
-      archive: { ...b.archive, headlines: [{ ...it, archivedOn: today() }, ...b.archive.headlines] }
-    };
-  });
-  const toIssue = id => setBoard(b => {
-    const it = b.headlines.find(h => h.id === id);
-    if (!it) return b;
-    toast("Moved to Issues");
-    return {
-      ...b,
-      headlines: b.headlines.filter(h => h.id !== id),
-      issues: [...b.issues, { id: uid(), title: it.title || "", owner: it.owner || "", date: it.date || today(), priority: String(b.issues.length + 1), rag: "A", note: it.commentary || "", noteAt: nowISO() }]
-    };
-  });
-  const toTodo = id => setBoard(b => {
-    const it = b.headlines.find(h => h.id === id);
-    if (!it) return b;
-    toast("Moved to To-dos");
-    return {
-      ...b,
-      headlines: b.headlines.filter(h => h.id !== id),
-      todos: [...b.todos, { id: uid(), task: it.title || "", owner: it.owner || "", raised: today(), due: "", note: it.commentary || "", noteAt: nowISO(), done: false }]
-    };
-  });
-
-  return React.createElement("div", null,
-    React.createElement(SectionTitle, { sub: "Good news and things to know. Title, owner, status and date are fixed — click the pencil to change them. Commentary is free and time-stamped." }, "Headlines"),
-    React.createElement("div", { style: card },
-      board.headlines.map(h => {
-        const ed = editId === h.id;
-        return React.createElement("div", { key: h.id, style: { border: `1px solid ${t.borderSoft}`, borderRadius: 9, padding: 12, marginBottom: 10 } },
-          React.createElement("div", { style: { display: "flex", gap: 10, alignItems: "flex-start", justifyContent: "space-between" } },
-            ed ? React.createElement("input", {
-              className: "tp-in",
-              value: h.title,
-              onChange: e => up(h.id, { title: e.target.value }),
-              placeholder: "Title (e.g. Extra Value)",
-              style: { fontSize: 14.5, color: t.ink, fontWeight: 600 }
-            }) : React.createElement("div", { style: { fontSize: 14.5, fontWeight: 600, color: t.ink, flex: 1 } }, h.title || "—"),
-            React.createElement(EditToggle, { on: ed, onClick: () => setEditId(ed ? null : h.id) })
-          ),
-          React.createElement("textarea", {
-            className: "tp-in",
-            value: h.commentary || "",
-            onChange: e => setComment(h.id, e.target.value),
-            rows: 2,
-            placeholder: "Commentary…",
-            style: { resize: "vertical", marginTop: 8, fontSize: 13.5, color: t.body }
-          }),
-          React.createElement(Stamp, { at: h.commentaryAt, verb: "commented" }),
-          React.createElement("div", { style: { display: "flex", gap: 14, alignItems: "center", marginTop: 8, flexWrap: "wrap" } },
-            ed ? React.createElement("span", { style: { display: "flex", alignItems: "center", gap: 6 } },
-              React.createElement("span", { style: { fontSize: 12, color: t.muted } }, "Owner"),
-              React.createElement(OwnerSelect, { value: h.owner, onChange: v => up(h.id, { owner: v }) })
-            ) : React.createElement(Locked, { label: "Owner", value: h.owner }),
-            ed ? React.createElement("span", { style: { display: "flex", alignItems: "center", gap: 6 } },
-              React.createElement("span", { style: { fontSize: 12, color: t.muted } }, "Status"),
-              React.createElement("select", {
-                className: "tp-in",
-                value: h.status || "",
-                onChange: e => up(h.id, { status: e.target.value }),
-                style: { width: 130 }
-              }, HL_STATUS.map(s => React.createElement("option", { key: s, value: s }, s || "—")))
-            ) : React.createElement(Locked, { label: "Status", value: h.status }),
-            ed ? React.createElement("span", { style: { display: "flex", alignItems: "center", gap: 6 } },
-              React.createElement("span", { style: { fontSize: 12, color: t.muted } }, "Date"),
-              React.createElement("input", { className: "tp-in", type: "date", value: h.date, onChange: e => up(h.id, { date: e.target.value }), style: { width: 150 } })
-            ) : React.createElement(Locked, { label: "Date", value: h.date }),
-            React.createElement("span", { style: { marginLeft: "auto", display: "flex", gap: 12, alignItems: "center" } },
-              React.createElement(MoveBtn, { icon: "alert", title: "Move to Issues", onClick: () => toIssue(h.id) }),
-              React.createElement(MoveBtn, { icon: "check", title: "Move to To-dos", onClick: () => toTodo(h.id) }),
-              React.createElement(ArchiveBtn, { onClick: () => archive(h.id) }),
-              React.createElement(DelBtn, { onClick: () => del(h.id) })
-            )
-          )
-        );
-      }),
-      React.createElement("button", { onClick: add, style: btnAdd }, React.createElement(Icon, { name: "plus", size: 15 }), " Add headline")
-    )
-  );
-}
-
-function Issues({ board, setBoard }) {
-  const [editId, setEditId] = useState(null);
-  const up = (id, patch) => setBoard(b => ({
-    ...b,
-    issues: b.issues.map(i => i.id === id ? { ...i, ...patch } : i)
-  }));
-  const setNote = (id, val) => up(id, { note: val, noteAt: nowISO() });
-  const add = () => {
-    const id = uid();
-    setBoard(b => ({
-      ...b,
-      issues: [...b.issues, { id, title: "", owner: "", date: today(), priority: String(b.issues.length + 1), rag: "A", note: "", noteAt: null }]
-    }));
-    setEditId(id);
-  };
-  const del = id => {
-    if (!confirmDel("Delete this issue?")) return;
-    setBoard(b => ({ ...b, issues: b.issues.filter(i => i.id !== id) }));
-    toast("Issue deleted");
-  };
-  const archive = id => setBoard(b => {
-    const it = b.issues.find(i => i.id === id);
-    if (!it) return b;
-    toast("Archived");
-    return {
-      ...b,
-      issues: b.issues.filter(i => i.id !== id),
-      archive: { ...b.archive, issues: [{ ...it, archivedOn: today() }, ...b.archive.issues] }
-    };
-  });
-  const toTodo = id => setBoard(b => {
-    const it = b.issues.find(i => i.id === id);
-    if (!it) return b;
-    toast("Moved to To-dos");
-    return {
-      ...b,
-      issues: b.issues.filter(i => i.id !== id),
-      todos: [...b.todos, { id: uid(), task: it.title || "", owner: it.owner || "", raised: today(), due: "", note: it.note || "", noteAt: nowISO(), done: false }]
-    };
-  });
-
-  const sorted = [...board.issues].sort((a, b) => (+a.priority || 99) - (+b.priority || 99));
-
-  return React.createElement("div", null,
-    React.createElement(SectionTitle, { sub: "Material issues to identify, discuss and solve. Title, owner and date are fixed — click the pencil to change. Status and commentary update freely." }, "Issues"),
-    React.createElement("div", { style: card },
-      sorted.map(i => {
-        const ed = editId === i.id;
-        return React.createElement("div", { key: i.id, style: { border: `1px solid ${t.borderSoft}`, borderRadius: 9, padding: 12, marginBottom: 10 } },
-          React.createElement("div", { style: { display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" } },
-            React.createElement(Cell, { value: i.priority, onChange: v => up(i.id, { priority: v }), w: 46, right: true }),
-            ed ? React.createElement("input", {
-              className: "tp-in",
-              value: i.title,
-              onChange: e => up(i.id, { title: e.target.value }),
-              placeholder: "Title",
-              style: { flex: 1, minWidth: 200, fontWeight: 600, color: t.ink }
-            }) : React.createElement("div", { style: { flex: 1, minWidth: 200, fontWeight: 600, color: t.ink } }, i.title || "—"),
-            React.createElement(RagChip, { value: i.rag, onChange: v => up(i.id, { rag: v }) }),
-            React.createElement(EditToggle, { on: ed, onClick: () => setEditId(ed ? null : i.id) }),
-            React.createElement(MoveBtn, { icon: "check", title: "Move to To-dos", onClick: () => toTodo(i.id) }),
-            React.createElement(ArchiveBtn, { onClick: () => archive(i.id) }),
-            React.createElement(DelBtn, { onClick: () => del(i.id) })
-          ),
-          React.createElement("div", { style: { display: "flex", gap: 14, alignItems: "center", marginTop: 8, flexWrap: "wrap" } },
-            ed ? React.createElement("span", { style: { display: "flex", alignItems: "center", gap: 6 } },
-              React.createElement("span", { style: { fontSize: 12, color: t.muted } }, "Raised by"),
-              React.createElement(OwnerSelect, { value: i.owner, onChange: v => up(i.id, { owner: v }) })
-            ) : React.createElement(Locked, { label: "Raised by", value: i.owner }),
-            ed ? React.createElement("span", { style: { display: "flex", alignItems: "center", gap: 6 } },
-              React.createElement("span", { style: { fontSize: 12, color: t.muted } }, "Date"),
-              React.createElement("input", { className: "tp-in", type: "date", value: i.date, onChange: e => up(i.id, { date: e.target.value }), style: { width: 150 } })
-            ) : React.createElement(Locked, { label: "Date", value: i.date }),
-            React.createElement(Locked, { label: "Status", value: RAG[i.rag].label })
-          ),
-          React.createElement("textarea", {
-            className: "tp-in",
-            value: i.note || "",
-            onChange: e => setNote(i.id, e.target.value),
-            rows: 2,
-            placeholder: "Commentary…",
-            style: { resize: "vertical", marginTop: 8, fontSize: 13.5, color: t.body }
-          }),
-          React.createElement(Stamp, { at: i.noteAt, verb: "commented" })
-        );
-      }),
-      React.createElement("button", { onClick: add, style: btnAdd }, React.createElement(Icon, { name: "plus", size: 15 }), " Add issue")
-    )
-  );
-}
-
-function Todos({ board, setBoard }) {
-  const [filter, setFilter] = useState("all");
-  const [editId, setEditId] = useState(null);
-  const up = (id, patch) => setBoard(b => ({
-    ...b,
-    todos: b.todos.map(d => d.id === id ? { ...d, ...patch } : d)
-  }));
-  const setNote = (id, val) => up(id, { note: val, noteAt: nowISO() });
-  const add = () => {
-    const id = uid();
-    setBoard(b => ({
-      ...b,
-      todos: [...b.todos, { id, task: "", owner: "", raised: today(), due: "", note: "", noteAt: null, done: false }]
-    }));
-    setEditId(id);
-  };
-  const del = id => {
-    if (!confirmDel("Delete this to-do?")) return;
-    setBoard(b => ({ ...b, todos: b.todos.filter(d => d.id !== id) }));
-    toast("To-do deleted");
-  };
-  const archive = id => setBoard(b => {
-    const it = b.todos.find(d => d.id === id);
-    if (!it) return b;
-    toast("Archived");
-    return {
-      ...b,
-      todos: b.todos.filter(d => d.id !== id),
-      archive: { ...b.archive, todos: [{ ...it, archivedOn: today() }, ...b.archive.todos] }
-    };
-  });
-  const toIssue = id => setBoard(b => {
-    const it = b.todos.find(d => d.id === id);
-    if (!it) return b;
-    toast("Moved to Issues");
-    return {
-      ...b,
-      todos: b.todos.filter(d => d.id !== id),
-      issues: [...b.issues, { id: uid(), title: it.task || "", owner: it.owner || "", date: today(), priority: String(b.issues.length + 1), rag: "A", note: it.note || "", noteAt: nowISO() }]
-    };
-  });
-  const archiveDone = () => setBoard(b => {
-    const done = b.todos.filter(d => d.done);
-    if (!done.length) return b;
-    toast(`Archived ${done.length}`);
-    return {
-      ...b,
-      todos: b.todos.filter(d => !d.done),
-      archive: { ...b.archive, todos: [...done.map(d => ({ ...d, archivedOn: today() })), ...b.archive.todos] }
-    };
-  });
-
-  const doneCount = board.todos.filter(d => d.done).length;
-  const shown = board.todos.filter(d => filter === "all" ? true : filter === "open" ? !d.done : filter === "overdue" ? !d.done && isOverdue(d.due) : d.done);
-  const filters = [["all", "All"], ["open", "Open"], ["overdue", "Overdue"], ["done", "Done"]];
-
-  return React.createElement("div", null,
-    React.createElement(SectionTitle, { sub: "The action log. Task, owner and dates are fixed — click the pencil to change. Tick Done freely; commentary is time-stamped." }, "To-dos"),
-    React.createElement("div", { style: card },
-      React.createElement("div", { style: { display: "flex", gap: 6, marginBottom: 12, flexWrap: "wrap" } },
-        filters.map(([k, label]) => React.createElement("button", {
-          key: k,
-          onClick: () => setFilter(k),
-          className: "tp-chipbtn",
-          style: {
-            border: `1px solid ${filter === k ? t.navy : t.border}`,
-            background: filter === k ? t.navy : "#fff",
-            color: filter === k ? "#fff" : t.body,
-            borderRadius: 20,
-            padding: "5px 12px",
-            cursor: "pointer",
-            font: "inherit",
-            fontSize: 12.5,
-            fontWeight: 600
-          }
-        }, label))
-      ),
-      shown.map(d => {
-        const ed = editId === d.id;
-        return React.createElement("div", { key: d.id, style: { borderBottom: `1px solid ${t.borderSoft}`, padding: "10px 4px" } },
-          React.createElement("div", { style: { display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" } },
-            React.createElement("input", {
-              type: "checkbox",
-              checked: d.done,
-              onChange: e => up(d.id, { done: e.target.checked }),
-              style: { width: 17, height: 17, accentColor: t.green, cursor: "pointer" }
-            }),
-            ed ? React.createElement("input", {
-              className: "tp-in",
-              value: d.task,
-              onChange: e => up(d.id, { task: e.target.value }),
-              placeholder: "Title",
-              style: { flex: 1, minWidth: 200, fontWeight: 600, color: t.ink }
-            }) : React.createElement("div", {
-              style: {
-                flex: 1,
-                minWidth: 200,
-                fontWeight: 600,
-                textDecoration: d.done ? "line-through" : "none",
-                color: d.done ? t.muted : t.ink
-              }
-            }, d.task || "—"),
-            !d.done && isOverdue(d.due) && React.createElement("span", { style: { fontSize: 11, color: t.red, fontWeight: 700 } }, "LATE"),
-            React.createElement(EditToggle, { on: ed, onClick: () => setEditId(ed ? null : d.id) }),
-            React.createElement(MoveBtn, { icon: "alert", title: "Move to Issues", onClick: () => toIssue(d.id) }),
-            React.createElement(ArchiveBtn, { onClick: () => archive(d.id) }),
-            React.createElement(DelBtn, { onClick: () => del(d.id) })
-          ),
-          React.createElement("div", { style: { display: "flex", gap: 14, alignItems: "center", marginTop: 8, marginLeft: 27, flexWrap: "wrap" } },
-            ed ? React.createElement("span", { style: { display: "flex", alignItems: "center", gap: 6 } },
-              React.createElement("span", { style: { fontSize: 12, color: t.muted } }, "Owner"),
-              React.createElement(OwnerSelect, { value: d.owner, onChange: v => up(d.id, { owner: v }) })
-            ) : React.createElement(Locked, { label: "Owner", value: d.owner }),
-            ed ? React.createElement("span", { style: { display: "flex", alignItems: "center", gap: 6 } },
-              React.createElement("span", { style: { fontSize: 12, color: t.muted } }, "Raised"),
-              React.createElement("input", { className: "tp-in", type: "date", value: d.raised, onChange: e => up(d.id, { raised: e.target.value }), style: { width: 150 } })
-            ) : React.createElement(Locked, { label: "Raised", value: d.raised }),
-            ed ? React.createElement("span", { style: { display: "flex", alignItems: "center", gap: 6 } },
-              React.createElement("span", { style: { fontSize: 12, color: t.muted } }, "Due"),
-              React.createElement("input", { className: "tp-in", type: "date", value: d.due, onChange: e => up(d.id, { due: e.target.value }), style: { width: 150 } })
-            ) : React.createElement(Locked, { label: "Due", value: d.due })
-          ),
-          React.createElement("textarea", {
-            className: "tp-in",
-            value: d.note || "",
-            onChange: e => setNote(d.id, e.target.value),
-            rows: 2,
-            placeholder: "Commentary…",
-            style: { resize: "vertical", marginTop: 8, marginLeft: 27, width: "calc(100% - 27px)", fontSize: 13, color: t.body }
-          }),
-          React.createElement("div", { style: { marginLeft: 27 } }, React.createElement(Stamp, { at: d.noteAt, verb: "commented" }))
-        );
-      }),
-      shown.length === 0 && React.createElement("div", { style: { color: t.muted, fontSize: 14, padding: "6px 4px" } }, "Nothing in this view."),
-      React.createElement("div", { style: { display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" } },
-        React.createElement("button", { onClick: add, style: btnAdd }, React.createElement(Icon, { name: "plus", size: 15 }), " Add to-do"),
-        doneCount > 0 && React.createElement("button", { onClick: archiveDone, style: { ...btnAdd, borderStyle: "solid", color: t.green, borderColor: t.green } },
-          React.createElement(Icon, { name: "archive", size: 15 }), " Archive ", doneCount, " completed"
-        )
-      )
-    )
-  );
-}
-
-function ArchiveView({ board, setBoard }) {
-  const restore = (type, id) => setBoard(b => {
-    const it = b.archive[type].find(x => x.id === id);
-    if (!it) return b;
-    const { archivedOn, ...clean } = it;
-    toast("Restored");
-    return {
-      ...b,
-      [type]: [...b[type], clean],
-      archive: { ...b.archive, [type]: b.archive[type].filter(x => x.id !== id) }
-    };
-  });
-
-  const del = (type, id) => {
-    if (!confirmDel("Permanently delete this archived item?")) return;
-    setBoard(b => ({
-      ...b,
-      archive: { ...b.archive, [type]: b.archive[type].filter(x => x.id !== id) }
-    }));
-    toast("Deleted");
-  };
-
-  const groups = [
-    { type: "rocks", label: "Rocks", get: x => x.title },
-    { type: "headlines", label: "Headlines", get: x => x.title },
-    { type: "issues", label: "Issues", get: x => x.title },
-    { type: "todos", label: "To-dos", get: x => x.task }
-  ];
-  const empty = groups.every(g => board.archive[g.type].length === 0);
-
-  return React.createElement("div", null,
-    React.createElement(SectionTitle, { sub: "Delivered and actioned items, kept for reference. Restore any item to bring it back." }, "Archive"),
-    empty && React.createElement("div", { style: card },
-      React.createElement("div", { style: { color: t.muted, fontSize: 14 } }, "Nothing archived yet. Use the archive icon on a rock, headline, issue or to-do once it's delivered.")
-    ),
-    groups.map(g => board.archive[g.type].length > 0 && React.createElement("div", { key: g.type, style: { ...card, marginBottom: 14 } },
-      React.createElement("div", { style: { fontWeight: 700, color: t.ink, fontSize: 15, marginBottom: 10 } },
-        g.label, " ", React.createElement("span", { style: { color: t.muted, fontWeight: 500 } }, "· ", board.archive[g.type].length)
-      ),
-      board.archive[g.type].map(x => React.createElement("div", {
-        key: x.id,
-        className: "tp-row",
-        style: { display: "flex", gap: 10, alignItems: "center", padding: "9px 6px", borderBottom: `1px solid ${t.borderSoft}` }
-      },
-      React.createElement("span", { style: { flex: 1, color: t.body, fontSize: 14 } }, g.get(x)),
-      React.createElement("span", { style: { fontSize: 12, color: t.muted, whiteSpace: "nowrap" } }, x.archivedOn),
-      React.createElement("span", { className: "tp-icon", onClick: () => restore(g.type, x.id), title: "Restore" },
-        React.createElement(Icon, { name: "restore", size: 16 })
-      ),
-      React.createElement(DelBtn, { onClick: () => del(g.type, x.id), title: "Delete permanently" })
-      ))
-    ))
-  );
-}
-
-function Intake({ board, setBoard, setView }) {
-  const [text, setText] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
-  const [proposal, setProposal] = useState(null);
-  const [picked, setPicked] = useState({});
-
-  const extract = async () => {
-    if (!text.trim()) return;
-    setLoading(true);
-    setError("");
-    setProposal(null);
-    const prompt = 'Read this transcript, return ONLY compact JSON: {"todos":[{"task":"","owner":""}],"issues":[{"title":"","owner":""}],"headlines":[{"text":"","owner":""}],"rockNotes":[{"match":"","note":""}]}. Short strings, owners only if named. Rocks: ' + board.rocks.map(r => r.title.slice(0, 60)).join(" | ") + "\n\nTRANSCRIPT:\n" + text.slice(0, 8000);
-    try {
-      const response = await fetch("/api/generateCommentary", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt: prompt })
-      });
-      if (!response.ok) throw new Error("API call failed with status " + response.status);
-      const res = await response.json();
-      const out = res.commentary || "";
-      const parsed = JSON.parse(out.replace(/```json/gi, "").replace(/```/g, "").trim());
-      setProposal(parsed);
-      const p = {};
-      (parsed.todos || []).forEach((_, i) => p["todo" + i] = true);
-      (parsed.issues || []).forEach((_, i) => p["issue" + i] = true);
-      (parsed.headlines || []).forEach((_, i) => p["hl" + i] = true);
-      (parsed.rockNotes || []).forEach((_, i) => p["rock" + i] = true);
-      setPicked(p);
-    } catch (e) {
-      setError(e.message || "Couldn't process transcript.");
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const apply = () => {
-    const p = proposal;
-    setBoard(b => {
-      const nb = {
-        ...b,
-        todos: [...b.todos],
-        issues: [...b.issues],
-        headlines: [...b.headlines],
-        rocks: b.rocks.map(r => ({ ...r }))
-      };
-      (p.todos || []).forEach((it, i) => {
-        if (picked["todo" + i]) nb.todos.push({
-          id: uid(),
-          task: it.task || "",
-          owner: it.owner || "",
-          raised: today(),
-          due: "",
-          note: "",
-          noteAt: null,
-          done: false
-        });
-      });
-      (p.issues || []).forEach((it, i) => {
-        if (picked["issue" + i]) nb.issues.push({
-          id: uid(),
-          title: it.title || "",
-          owner: it.owner || "",
-          date: today(),
-          priority: String(nb.issues.length + 1),
-          rag: "A",
-          note: "",
-          noteAt: null
-        });
-      });
-      (p.headlines || []).forEach((it, i) => {
-        if (picked["hl" + i] && it.text) nb.headlines.push({
-          id: uid(),
-          title: it.text,
-          commentary: "",
-          commentaryAt: null,
-          owner: it.owner || "",
-          status: "",
-          date: today()
-        });
-      });
-      (p.rockNotes || []).forEach((it, i) => {
-        if (!picked["rock" + i]) return;
-        const key = (it.match || "").toLowerCase().split(" ")[0];
-        const idx = nb.rocks.findIndex(r => key && r.title.toLowerCase().includes(key));
-        if (idx >= 0) nb.rocks[idx].note = (nb.rocks[idx].note ? nb.rocks[idx].note + " · " : "") + (it.note || "");
-        else nb.issues.push({
-          id: uid(),
-          title: (it.match ? it.match + ": " : "") + (it.note || ""),
-          owner: "",
-          date: today(),
-          priority: String(nb.issues.length + 1),
-          rag: "A",
-          note: "",
-          noteAt: null
-        });
-      });
-      return nb;
-    });
-    setProposal(null);
-    setText("");
-    setPicked({});
-    setView("overview");
-    toast("Applied to board");
-  };
-
-  const toggle = k => setPicked(p => ({ ...p, [k]: !p[k] }));
-  const has = proposal && ((proposal.todos || []).length || (proposal.issues || []).length || (proposal.headlines || []).length || (proposal.rockNotes || []).length);
-
-  return React.createElement("div", null,
-    React.createElement(SectionTitle, { sub: "Paste a transcript. It proposes updates; you choose what to apply." }, "Transcript intake"),
-    React.createElement("div", { style: card },
-      React.createElement("textarea", {
-        className: "tp-in",
-        value: text,
-        onChange: e => setText(e.target.value),
-        rows: 9,
-        placeholder: "Paste your transcript here…",
-        style: { resize: "vertical", fontFamily: "'Consolas',monospace", fontSize: 13 }
-      }),
-      React.createElement("div", { style: { display: "flex", gap: 10, alignItems: "center", marginTop: 12, flexWrap: "wrap" } },
-        React.createElement("button", {
-          onClick: extract,
-          disabled: loading || !text.trim(),
-          className: "tp-primary",
-          style: { ...btnPrimary, display: "flex", alignItems: "center", gap: 7, opacity: loading || !text.trim() ? 0.6 : 1 }
-        },
-        loading ? React.createElement(Icon, { name: "loader", size: 14 }) : React.createElement(Icon, { name: "sparkles", size: 14 }),
-        loading ? "Reading…" : "Extract updates"
-        ),
-        React.createElement("span", { style: { fontSize: 12.5, color: t.muted } }, "Nothing changes until you apply.")
-      )
-    ),
-    error && React.createElement("div", { style: { ...card, marginTop: 14 } },
-      React.createElement("div", { style: notice(t.amber, RAG.A.soft) }, error)
-    ),
-    proposal && React.createElement("div", { style: { ...card, marginTop: 14 } },
-      React.createElement("div", { style: { fontWeight: 700, color: t.ink, fontSize: 15, marginBottom: 12 } }, "Proposed updates — tick what to apply"),
-      !has && React.createElement("div", { style: { color: t.muted, fontSize: 14 } }, "Nothing actionable found."),
-      React.createElement(ProposalGroup, {
-        title: "To-dos",
-        items: (proposal.todos || []).map((it, i) => ({ key: "todo" + i, label: it.task + (it.owner ? ` — ${it.owner}` : "") })),
-        picked: picked,
-        toggle: toggle
-      }),
-      React.createElement(ProposalGroup, {
-        title: "Issues",
-        items: (proposal.issues || []).map((it, i) => ({ key: "issue" + i, label: it.title + (it.owner ? ` — ${it.owner}` : "") })),
-        picked: picked,
-        toggle: toggle
-      }),
-      React.createElement(ProposalGroup, {
-        title: "Headlines",
-        items: (proposal.headlines || []).map((it, i) => ({ key: "hl" + i, label: it.text + (it.owner ? ` — ${it.owner}` : "") })),
-        picked: picked,
-        toggle: toggle
-      }),
-      React.createElement(ProposalGroup, {
-        title: "Rock notes",
-        items: (proposal.rockNotes || []).map((it, i) => ({ key: "rock" + i, label: `${it.match ? it.match + ": " : ""}${it.note}` })),
-        picked: picked,
-        toggle: toggle
-      }),
-      has ? React.createElement("button", {
-        onClick: apply,
-        className: "tp-primary",
-        style: { ...btnPrimary, marginTop: 14, display: "flex", alignItems: "center", gap: 7 }
-      }, "Apply selected ", React.createElement(Icon, { name: "chevR", size: 15 })) : null
-    )
-  );
-}
-
-function ProposalGroup({ title, items, picked, toggle }) {
-  if (!items.length) return null;
-  return React.createElement("div", { style: { marginBottom: 14 } },
-    React.createElement("div", { style: { fontSize: 11, textTransform: "uppercase", letterSpacing: 0.6, color: t.muted, fontWeight: 600, marginBottom: 6 } }, title),
-    items.map(it => React.createElement("label", {
-      key: it.key,
-      style: {
-        display: "flex",
-        gap: 10,
-        alignItems: "flex-start",
-        padding: "7px 8px",
-        borderRadius: 7,
-        cursor: "pointer",
-        background: picked[it.key] ? RAG.G.soft : "transparent"
-      }
-    },
-    React.createElement("input", {
-      type: "checkbox",
-      checked: !!picked[it.key],
-      onChange: () => toggle(it.key),
-      style: { width: 16, height: 16, accentColor: t.green, marginTop: 2, cursor: "pointer" }
-    }),
-    React.createElement("span", { style: { fontSize: 14, color: t.ink } }, it.label)
-    ))
-  );
-}
-
-function boardToText(b) {
-  const l = [];
-  l.push("METRICS:");
-  b.metrics.forEach(m => {
-    const h = m.history;
-    const last = h[h.length - 1];
-    const c = cumulativeOf(m);
-    l.push(`- ${m.name}: latest ${last ? fmtVal(last.value) : "—"}${c != null ? ", cumulative " + fmtVal(c) : ""} (target ${m.goal}) [${RAG[m.rag].label}] (${m.owner})`);
-  });
-  l.push("ROCKS:");
-  b.rocks.forEach(r => l.push(`- ${r.title.slice(0, 120)}: ${r.pct}% by ${r.due} [${RAG[r.rag].label}] (${r.owner})`));
-  l.push("ISSUES:");
-  b.issues.forEach(i => l.push(`- P${i.priority} ${i.title} [${RAG[i.rag].label}]${i.note ? " — " + i.note : ""}`));
-  l.push("TO-DOS:");
-  b.todos.forEach(d => l.push(`- [${d.done ? "done" : isOverdue(d.due) ? "LATE" : "open"}] ${d.task} (${d.owner}${d.due ? ", due " + d.due : ""})`));
-  l.push("HEADLINES:");
-  b.headlines.forEach(h => l.push(`- ${h.title}${h.commentary ? ": " + h.commentary : ""}${h.status ? " [" + h.status + "]" : ""}`));
-  return l.join("\n");
 }
 
 ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(App, null));
