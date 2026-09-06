@@ -27,6 +27,7 @@
 <div id="root"></div>
 
 <!-- External Libraries (UMD builds that expose global window.React, window.ReactDOM, window.msal) -->
+<!-- MSAL popup authentication uses this page as its registered redirect URI. -->
 <script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
 <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@azure/msal-browser@3.28.0/lib/msal-browser.min.js"></script>
@@ -80,34 +81,97 @@ window.addEventListener("error", function(e) {
   function say(m){ render(m); }
   function err(m){ console.error("TP sync:",m); if(!panel) return; var s = document.createElement("span"); s.innerHTML = dot("#E7442B")+String(m).slice(0,200); panel.replaceChildren(s, btn("Retry",connect)); }
 
+  /*
+   * MSAL authentication
+   *
+   * IMPORTANT: loginPopup() uses the redirect URI inside the popup window.
+   * This file is also the dashboard page, so the popup must NOT initialise
+   * the dashboard or reload itself while MSAL is reading the auth hash.
+   * Otherwise the popup can clear the hash and MSAL reports:
+   *   hash_empty_error
+   */
+  var TP_IS_AUTH_POPUP = !!(window.opener && window.opener !== window);
   var msalApp;
+  var _msalInitPromise = null;
+
+  function getRedirectUri(){
+    // Keep this exactly aligned with the Entra ID App Registration.
+    // The existing application is registered against the site origin.
+    return window.location.origin + "/";
+  }
+
   function initMsal(){
     if(msalApp) return msalApp;
-    if(typeof msal === "undefined"){ throw new Error("MSAL library failed to load from CDN. Check your network or content blocker."); }
+    if(typeof msal === "undefined"){
+      throw new Error("MSAL library failed to load from CDN. Check your network or content blocker.");
+    }
     msalApp = new msal.PublicClientApplication({
       auth: {
         clientId: CONFIG.clientId,
         authority: "https://login.microsoftonline.com/" + CONFIG.tenantId,
-        redirectUri: window.location.origin
+        redirectUri: getRedirectUri(),
+        navigateToLoginRequestUrl: false
       },
-      cache: { cacheLocation: "localStorage" }
+      cache: {
+        cacheLocation: "localStorage",
+        storeAuthStateInCookie: false
+      },
+      system: {
+        allowRedirectInIframe: false
+      }
     });
     return msalApp;
   }
-  var _ready = false;
-  async function ensure(){ if(!_ready){ await initMsal().initialize(); _ready = true; } }
+
+  async function ensure(){
+    if(!_msalInitPromise){
+      _msalInitPromise = initMsal().initialize();
+    }
+    await _msalInitPromise;
+  }
+
   async function token(){
+    if(TP_IS_AUTH_POPUP){
+      throw new Error("Authentication popup is still processing the Microsoft sign-in response.");
+    }
+
     await ensure();
+
     var acct = msalApp.getActiveAccount() || msalApp.getAllAccounts()[0];
+
     if(!acct){
-      var r = await msalApp.loginPopup({ scopes: CONFIG.scopes });
+      var r = await msalApp.loginPopup({
+        scopes: CONFIG.scopes,
+        redirectUri: getRedirectUri(),
+        popupWindowAttributes: {
+          popupSize: { width: 520, height: 650 }
+        }
+      });
+      if(!r || !r.account){
+        throw new Error("Microsoft sign-in completed without an account.");
+      }
       msalApp.setActiveAccount(r.account);
       acct = r.account;
     }
+
     try{
-      return (await msalApp.acquireTokenSilent({ account: acct, scopes: CONFIG.scopes })).accessToken;
+      var silent = await msalApp.acquireTokenSilent({
+        account: acct,
+        scopes: CONFIG.scopes
+      });
+      return silent.accessToken;
     } catch(e){
-      return (await msalApp.acquireTokenPopup({ scopes: CONFIG.scopes })).accessToken;
+      var interactive = await msalApp.acquireTokenPopup({
+        scopes: CONFIG.scopes,
+        redirectUri: getRedirectUri(),
+        popupWindowAttributes: {
+          popupSize: { width: 520, height: 650 }
+        }
+      });
+      if(!interactive || !interactive.accessToken){
+        throw new Error("Microsoft authentication did not return an access token.");
+      }
+      return interactive.accessToken;
     }
   }
 
@@ -172,7 +236,8 @@ window.addEventListener("error", function(e) {
       var board = await readBoard();
       if(board){ _set.call(localStorage, CONFIG.storageKey, JSON.stringify(board)); }
       sessionStorage.setItem("tp_synced", "1");
-      location.reload();
+      var cleanUrl = window.location.href.split("#")[0];
+      window.location.replace(cleanUrl);
     } catch(e){
       TP._loading = false;
       err(e.message);
@@ -180,7 +245,7 @@ window.addEventListener("error", function(e) {
   }
   async function connect(){
     try{
-      initMsal();
+      await ensure();
       await token();
       TP.connected = true;
       render();
@@ -191,21 +256,34 @@ window.addEventListener("error", function(e) {
   }
 
   function boot(){
+    /*
+     * When MSAL opens this same HTML as its popup redirect page, leave the
+     * popup completely alone. MSAL's parent window monitors the popup hash.
+     * Running the dashboard here can reload/replace the page before MSAL has
+     * consumed the hash, which is the source of hash_empty_error.
+     */
+    if(TP_IS_AUTH_POPUP){
+      document.title = "Signing in…";
+      document.body.innerHTML = "<div style=\"font:14px Segoe UI,sans-serif;padding:24px;color:#4A5568\">Completing Microsoft sign-in…</div>";
+      return;
+    }
+
     ui();
     if(!TP.configured){ render(); return; }
-    try{
-      initMsal();
-      ensure().then(function(){
-        var signedIn = msalApp.getAllAccounts().length > 0;
-        if(signedIn){
-          TP.connected = true;
-          render();
-          if(!sessionStorage.getItem("tp_synced")){ loadLatest(); }
-        } else {
-          render();
-        }
-      }).catch(function(e){ err(e.message); });
-    } catch(e){ err(e.message); }
+
+    ensure().then(function(){
+      var accounts = msalApp.getAllAccounts();
+      var signedIn = accounts.length > 0;
+      if(signedIn){
+        var active = msalApp.getActiveAccount() || accounts[0];
+        msalApp.setActiveAccount(active);
+        TP.connected = true;
+        render();
+        if(!sessionStorage.getItem("tp_synced")){ loadLatest(); }
+      } else {
+        render();
+      }
+    }).catch(function(e){ err(e.message || String(e)); });
   }
   if(document.readyState==="loading") document.addEventListener("DOMContentLoaded", boot); else boot();
 })();
