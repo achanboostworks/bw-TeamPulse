@@ -33,6 +33,30 @@
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 
 <script>
+  async function checkUserAccess() {
+  const response = await fetch('/.auth/me');
+  const payload = await response.json();
+  const clientPrincipal = payload.clientPrincipal;
+
+  if (!clientPrincipal) {
+    // Not logged in, redirect to login
+    window.location.href = '/.auth/login/aad';
+    return;
+  }
+
+  // Check user details / claims for the email or user ID
+  const userDetails = clientPrincipal.userDetails || '';
+  
+  if (!userDetails.endsWith('@boostworks.co.uk')) {
+    alert('Access denied. Only @boostworks.co.uk accounts are allowed.');
+    window.location.href = '/.auth/logout';
+  }
+}
+
+checkUserAccess();
+</script>
+  
+<script>
 window.addEventListener("error", function(e) {
   var r = document.getElementById("root");
   if (r && !r.hasChildNodes()) {
