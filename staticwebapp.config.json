@@ -7,7 +7,7 @@
   ],
   "responseOverrides": {
     "401": {
-      "redirect": "https://login.microsoftonline.com/a6fa4a06-5e81-4111-bea5-fbd229b24c60/oauth2/v2.0/authorize?client_id=a5b6eeff-e4ea-4abe-9ee7-09e5b58f0008&response_type=code&redirect_uri=https://lemon-forest-00d2ca903.7.azurestaticapps.net/.auth/login/aad/callback&scope=openid+profile+email",
+      "redirect": "https://login.microsoftonline.com/a6fa4a06-5e81-4111-bea5-fbd229b24c60/oauth2/v2.0/authorize?client_id=a5b6eeff-e4ea-4abe-9ee7-09e5b58f0008&response_type=code&redirect_uri=https://lemon-forest-00d2ca903.7.azurestaticapps.net/.auth/login/aad/callback&scope=openid%20profile%20email",
       "statusCode": 302
     }
   }
